@@ -1,5 +1,6 @@
 """Movie detail card rendering for the terminal."""
 
+from src.ui.reports import title_line
 from src.ui.term import _T, style, wrap
 
 
@@ -7,15 +8,13 @@ def _comma_list(items: list[str]) -> str:
     return ", ".join(str(x) for x in items if x)
 
 
+def _pluralize(count: int, singular: str, plural: str | None = None) -> str:
+    return plural if plural else f"{singular}s" if count > 1 else singular
+
+
 def render_detail_card(membership: dict, detail: dict) -> None:
     """Print a text detail card for a movie."""
-    title = membership.get("title") or "(untitled)"
-    year = ""
-    release = membership.get("release_date", "")
-    if release and len(release) >= 4:
-        year = f" ({release[:4]})"
-
-    lines = [style(f"{title}{year}", _T.BOLD, _T.CYAN)]
+    lines = [style(title_line(membership), _T.BOLD, _T.CYAN)]
 
     tagline = detail.get("tagline")
     if tagline:
@@ -37,7 +36,8 @@ def render_detail_card(membership: dict, detail: dict) -> None:
 
     directors = detail.get("directors", [])
     if directors:
-        lines.append(f"Director{'s' if len(directors) > 1 else ''}: {_comma_list(directors)}")
+        label = _pluralize(len(directors), "Director")
+        lines.append(f"{label}: {_comma_list(directors)}")
 
     cast = detail.get("cast", [])[:8]
     if cast:

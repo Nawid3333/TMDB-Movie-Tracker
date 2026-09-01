@@ -41,15 +41,19 @@ def atomic_write_json(filepath, data, *, indent: int | None = 2, backup: bool = 
     rename can land while the data is still sitting in the page cache,
     leaving a file that atomically points at nothing useful. The
     flush()+fsync() below close that gap. Shared by every JSON writer in
-    this project (index, checkpoint, failed list, ignore list, ignored
-    seasons) so the durability behaviour can't drift between call sites.
+    this project (index, details, session, collection cache, keyword TV
+    cache, gaps, enrichment checkpoint) so the durability behaviour can't
+    drift between call sites.
 
     A unique mkstemp() name (rather than a fixed "<file>.tmp") avoids
     collisions if two runs ever write the same file concurrently, and the
     except-branch cleanup means a failed write never leaves an orphaned
     temp file behind.
     """
-    dirpath = os.path.dirname(filepath) or "."
+    dirpath = os.path.dirname(filepath)
+    if not dirpath:
+        dirpath = os.getcwd()
+    dirpath = os.path.abspath(dirpath)
     os.makedirs(dirpath, exist_ok=True)
 
     fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix=".tmp")

@@ -2,10 +2,11 @@
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-from config.config import DATA_DIR, TMDB_LIST_ID
+import config.config as _config
+from config.config import DATA_DIR
 from src.atomic_io import atomic_write_json
 from src.tmdb_api import TMDBClient
 
@@ -42,8 +43,8 @@ def fetch_list(
     Returns (items, incomplete). Incomplete is True if any page failed.
     The raw last-page payload is cached for inspection.
     """
-    list_id = list_id or TMDB_LIST_ID
-    if not list_id:
+    list_id = list_id if list_id is not None else _config.TMDB_LIST_ID
+    if not list_id or (isinstance(list_id, str) and not list_id.strip()):
         raise ListFetchError("TMDB_LIST_ID is not configured")
     list_id = str(list_id)
 
@@ -52,20 +53,41 @@ def fetch_list(
         page = 1
         total_pages = 1
         incomplete = False
+        # How many items the list itself says it holds. Used after the loop to
+        # prove the fetch actually finished: `incomplete` is what gates every
+        # removal downstream, so a short read must never reach detect_changes
+        # looking like a clean one.
+        expected_items: int | None = None
 
         while page <= total_pages:
             try:
                 data = _fetch_page(client, list_id, page, auth=auth)
             except Exception as exc:
                 logger.error("Failed to fetch list page %d: %s", page, exc)
+                logger.warning("List fetch truncated at %d items after page %d", len(items), page)
                 incomplete = True
                 break
 
-            items.extend(data.get("items", []))
+            page_items = data.get("items", []) or []
+            if not page_items:
+                # An empty page *before* the last expected one is a truncated
+                # response, not the end of the list. Ending the loop quietly
+                # here reported a partial fetch as complete, and every item on
+                # the pages never read was then proposed for removal.
+                if page < total_pages:
+                    logger.error(
+                        "List page %d of %d came back empty; treating the fetch as incomplete",
+                        page,
+                        total_pages,
+                    )
+                    incomplete = True
+                break
+            items.extend(page_items)
 
             # Derive page count from item_count when total_pages is unreliable.
             item_count = data.get("item_count")
             if isinstance(item_count, int) and item_count > 0:
+                expected_items = item_count
                 derived_total = (item_count + 19) // 20  # 20 per page
                 total_pages = max(total_pages, derived_total)
 
@@ -85,13 +107,27 @@ def fetch_list(
                 incomplete = True
                 break
 
+        # Final proof that the fetch is whole. Every early exit above sets the
+        # flag for its own reason; this catches the rest -- pages that came
+        # back under-filled, or a list that shrank while it was being read --
+        # because the count the list reported is the only thing that knows how
+        # many items there should have been.
+        if expected_items is not None and len(items) < expected_items:
+            logger.error(
+                "List reported %d items but only %d were read; treating the fetch as incomplete",
+                expected_items,
+                len(items),
+            )
+            incomplete = True
+
         return items, incomplete
 
     items, incomplete = _try_fetch(auth=False)
 
-    # If API-key-only failed entirely, try with a session (private list).
-    if not items and use_session_on_private:
-        logger.info("No items fetched without session; attempting session upgrade")
+    # If API-key-only fetch failed (incomplete), try with a session (private list).
+    # A genuinely empty public list should not trigger a session upgrade.
+    if not items and incomplete and use_session_on_private:
+        logger.info("List fetch looks private; attempting session upgrade")
         session_id = client.ensure_session()
         if session_id:
             items, incomplete = _try_fetch(auth=True)
@@ -104,7 +140,7 @@ def fetch_list(
     try:
         cache_payload = {
             "list_id": list_id,
-            "cached_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "cached_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "item_count": len(items),
             "incomplete": incomplete,
             "items": items,

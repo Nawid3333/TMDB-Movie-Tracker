@@ -6,36 +6,10 @@ Loads environment variables, sets paths, and provides tunables.
 import contextlib
 import logging
 import os
-import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from dotenv import load_dotenv
-
-
-def _configure_console() -> None:
-    """Make arrow/box-drawing output safe on any code page."""
-    for stream in (sys.stdout, sys.stderr):
-        with contextlib.suppress(Exception):
-            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
-
-
-_configure_console()
-
-# Load environment variables from .env file at import time.
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
-
-# ==================== CREDENTIALS ====================
-TMDB_API_KEY = os.getenv("TMDB_API_KEY", "").strip()
-TMDB_LIST_ID = os.getenv("TMDB_LIST_ID", "").strip()
-TMDB_SESSION_ID = os.getenv("TMDB_SESSION_ID", "").strip()
-TMDB_V4_ACCESS_TOKEN = os.getenv("TMDB_V4_ACCESS_TOKEN", "").strip()
-TMDB_USERNAME = os.getenv("TMDB_USERNAME", "").strip()
-TMDB_PASSWORD = os.getenv("TMDB_PASSWORD", "").strip()
-
-# ==================== REGION / LANGUAGE ====================
-TMDB_LANGUAGE = os.getenv("TMDB_LANGUAGE", "de-DE").strip() or "de-DE"
-TMDB_FALLBACK_REGION = os.getenv("TMDB_FALLBACK_REGION", "DE").strip() or "DE"
 
 # ==================== DIRECTORIES ====================
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -43,19 +17,28 @@ DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = BASE_DIR / "logs"
 POSTERS_DIR = DATA_DIR / "posters"
 
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-POSTERS_DIR.mkdir(parents=True, exist_ok=True)
-
 # ==================== FILE PATHS ====================
 INDEX_FILE = DATA_DIR / "index.json"
 DETAILS_FILE = DATA_DIR / "details.json"
-SESSION_FILE = DATA_DIR / "session.json"
 COLLECTION_CACHE_FILE = DATA_DIR / "collection_cache.json"
 KEYWORD_TV_CACHE_FILE = DATA_DIR / "keyword_tv_cache.json"
 GAPS_FILE = DATA_DIR / "gaps.json"
 ENRICH_CHECKPOINT_FILE = DATA_DIR / "enrich_checkpoint.json"
 LOG_FILE = LOGS_DIR / "movie_tracker.log"
+
+# Mismatch report written when the local index differs from the live TMDB list.
+MISMATCH_REPORT_FILE = DATA_DIR / "mismatch_report.json"
+
+# Default batch file for adding movies from a list of URLs/IDs.
+DEFAULT_BATCH_FILE = BASE_DIR / "movie_urls.txt"
+
+
+# Load the environment file before reading any settings so credentials and
+# tunables are available as soon as this module is imported. This matches the
+# pattern used in the other scraper projects and removes the bootstrap-order
+# bug where values were copied before ``.env`` was loaded.
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+
 
 # ==================== API SETTINGS ====================
 TMDB_API_BASE_URL = "https://api.themoviedb.org/3"
@@ -82,6 +65,19 @@ POSTER_MODE = os.getenv("POSTER_MODE", "auto").strip().lower()
 POSTER_SIZE = os.getenv("POSTER_SIZE", "w342").strip() or "w342"
 
 
+# ==================== CREDENTIALS ====================
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "").strip()
+TMDB_LIST_ID = os.getenv("TMDB_LIST_ID", "").strip()
+TMDB_SESSION_ID = os.getenv("TMDB_SESSION_ID", "").strip()
+TMDB_V4_ACCESS_TOKEN = os.getenv("TMDB_V4_ACCESS_TOKEN", "").strip()
+TMDB_USERNAME = os.getenv("TMDB_USERNAME", "").strip()
+TMDB_PASSWORD = os.getenv("TMDB_PASSWORD", "").strip()
+
+# ==================== REGION / LANGUAGE ====================
+TMDB_LANGUAGE = os.getenv("TMDB_LANGUAGE", "de-DE").strip() or "de-DE"
+TMDB_FALLBACK_REGION = os.getenv("TMDB_FALLBACK_REGION", "DE").strip() or "DE"
+
+
 # ==================== LOGGING ====================
 def setup_logging() -> logging.Logger:
     """Configure rotating file + console logging."""
@@ -89,6 +85,8 @@ def setup_logging() -> logging.Logger:
     if logger.handlers:
         return logger
     logger.setLevel(logging.DEBUG)
+
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
@@ -105,3 +103,17 @@ def setup_logging() -> logging.Logger:
         logging.getLogger(name).setLevel(logging.WARNING)
 
     return logger
+
+
+def bootstrap() -> None:
+    """Reconfigure stdout/stderr for UTF-8.
+
+    Called once from ``main.py``. The environment file is already loaded at
+    module import time, so this function only normalises the console encoding
+    and can be called safely from tests without side effects.
+    """
+    import sys
+
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]

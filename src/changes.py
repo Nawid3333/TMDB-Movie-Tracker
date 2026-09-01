@@ -3,7 +3,7 @@
 import logging
 from dataclasses import dataclass, field
 
-from src.index import validate_membership_record
+from src.index import build_membership_record, validate_membership_record
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,6 @@ class ChangeSet:
 
     additions: dict[str, dict] = field(default_factory=dict)
     removals: dict[str, dict] = field(default_factory=dict)
-    gone: dict[str, dict] = field(default_factory=dict)
     unchanged: dict[str, dict] = field(default_factory=dict)
     incomplete: bool = False
     current_count: int = 0
@@ -32,19 +31,7 @@ def _extract_list_movie(item: dict) -> dict | None:
     movie_id = movie.get("id")
     if not movie_id:
         return None
-    record = {
-        "id": int(movie_id),
-        "title": (movie.get("title") or "").strip(),
-        "title_original": (movie.get("original_title") or "").strip(),
-        "title_english": "",
-        "title_german": "",
-        "release_date": (movie.get("release_date") or "").strip(),
-        "poster_path": movie.get("poster_path") or None,
-        "poster_file": None,
-        "status": "",
-        "gone": False,
-        "remote_push": "skipped",
-    }
+    record = build_membership_record(movie)
     try:
         validate_membership_record(record)
     except ValueError as exc:

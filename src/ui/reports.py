@@ -1,17 +1,30 @@
 """Render change reports and other summary output to the terminal."""
 
+from datetime import UTC, datetime
+
 from src.changes import ChangeSet
 from src.ui.term import _T, style
 
 
-def title_line(record: dict) -> str:
+def _is_upcoming(date_str: str) -> bool:
+    if not date_str:
+        return False
+    try:
+        date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        return date > datetime.now(UTC).date()
+    except ValueError:
+        return False
+
+
+def title_line(record: dict, *, show_upcoming: bool = False) -> str:
     """Render a stable `title (year)` label for reports and menus."""
-    title = record.get("title") or "(untitled)"
+    title = record.get("title") or record.get("name") or "(untitled)"
     year = ""
-    release = record.get("release_date", "")
+    release = record.get("release_date") or record.get("first_air_date") or ""
     if release and len(release) >= 4:
         year = f" ({release[:4]})"
-    return f"{title}{year}"
+    upcoming = " (upcoming)" if show_upcoming and _is_upcoming(release) else ""
+    return f"{title}{year}{upcoming}"
 
 
 def render_change_report(change_set: ChangeSet) -> None:

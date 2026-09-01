@@ -2,6 +2,27 @@
 
 from src.ui.term import _T, style
 
+_PREVIEW_LIMIT = 20
+_DEFAULT_PAGE_SIZE = 20
+
+
+def paginate_list(items: list[str], page_size: int = _DEFAULT_PAGE_SIZE) -> None:
+    """Show a long list in pages, Enter = next page, q = skip remaining."""
+    if not items:
+        return
+    total = len(items)
+    idx = 0
+    while idx < total:
+        end = min(idx + page_size, total)
+        for item in items[idx:end]:
+            print(f"  • {item}")
+        idx = end
+        if idx < total:
+            choice = input(f"  ({idx}/{total}) Enter = more, q = skip: ").strip().lower()
+            if choice == "q":
+                print(f"  ... skipped {total - idx} remaining")
+                break
+
 
 def ask_choice(prompt: str, options: list[str], default: str = "") -> str:
     """Ask the user to pick one of a list of options.
@@ -33,10 +54,7 @@ def confirm(prompt: str, default: bool = False) -> bool:
 
 
 def confirm_category(category: str, items: list[str], default: bool = False) -> bool:
-    """Confirm a category of changes with a bounded preview."""
+    """Confirm a category of changes with paginated preview."""
     print(style(f"\n[{category}]", _T.BOLD))
-    for item in items[:20]:
-        print(f"  • {item}")
-    if len(items) > 20:
-        print(f"  ... and {len(items) - 20} more")
+    paginate_list(items, page_size=_DEFAULT_PAGE_SIZE)
     return confirm("Approve these changes?", default=default)

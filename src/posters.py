@@ -7,17 +7,28 @@ from pathlib import Path
 
 import httpx
 
-from config.config import POSTER_MODE, POSTER_SIZE, POSTERS_DIR
+from config.config import POSTER_MODE, POSTER_SIZE
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "detect_poster_mode",
+    "download_poster",
+    "poster_cache_path",
+    "render_poster",
+]
 
 
 def _poster_url(poster_path: str, size: str = POSTER_SIZE) -> str:
     return f"https://image.tmdb.org/t/p/{size}{poster_path}"
 
 
-def poster_cache_path(movie_id: int, poster_path: str, posters_dir: Path = POSTERS_DIR) -> Path:
+def poster_cache_path(movie_id: int, poster_path: str, posters_dir: Path | None = None) -> Path:
     """Return the cache path for a poster, hashing the TMDB path into the filename."""
+    if posters_dir is None:
+        from config.config import POSTERS_DIR
+
+        posters_dir = POSTERS_DIR
     short_hash = hashlib.sha1(poster_path.encode("utf-8")).hexdigest()[:8]
     return posters_dir / f"{movie_id}_{short_hash}.jpg"
 
@@ -27,7 +38,7 @@ def download_poster(
     movie_id: int,
     poster_path: str | None,
     *,
-    posters_dir: Path = POSTERS_DIR,
+    posters_dir: Path | None = None,
     skip_existing: bool = True,
 ) -> Path | None:
     """Download a poster from TMDB's image CDN.
@@ -43,7 +54,9 @@ def download_poster(
     url = _poster_url(poster_path)
     try:
         resp = client.get(url, timeout=30)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            logger.warning("Poster fetch failed for %s: HTTP %s", movie_id, resp.status_code)
+            return None
         dest.parent.mkdir(parents=True, exist_ok=True)
         with open(dest, "wb") as f:
             f.write(resp.content)
@@ -99,23 +112,3 @@ def _render_iterm(data: bytes) -> str:
 def _render_kitty(data: bytes) -> str:
     """Render an inline image using the Kitty graphics protocol (placeholder)."""
     return ""
-
-
-def prefetch_missing_posters(
-    client: httpx.Client,
-    movies: dict[str, dict],
-    *,
-    posters_dir: Path = POSTERS_DIR,
-) -> dict[int, Path | None]:
-    """Download all missing posters for a set of movies.
-
-    Returns a mapping of movie id -> cache path or None.
-    """
-    results: dict[int, Path | None] = {}
-    for record in movies.values():
-        movie_id = record.get("id")
-        poster_path = record.get("poster_path")
-        if not movie_id or not poster_path:
-            continue
-        results[movie_id] = download_poster(client, movie_id, poster_path, posters_dir=posters_dir)
-    return results

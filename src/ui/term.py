@@ -93,7 +93,8 @@ def box(lines: list[str], width: int | None = None) -> list[str]:
     width = max(width, inner)
     out = ["╔" + "═" * width + "╗"]
     for line in lines:
-        out.append("║ " + line + " " * (width - display_width(line) - 1) + "║")
+        pad = max(width - display_width(line) - 1, 0)
+        out.append("║ " + line + " " * pad + "║")
     out.append("╚" + "═" * width + "╝")
     return out
 

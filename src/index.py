@@ -3,10 +3,11 @@
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-from config.config import DETAILS_FILE, INDEX_FILE, TMDB_LIST_ID
+import config.config as _config
+from config.config import DETAILS_FILE, INDEX_FILE
 from src.atomic_io import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -44,9 +45,17 @@ def _validate_schema(data: dict, current: int, kind: str) -> None:
 
 def _ensure_index_structure(data: dict) -> dict:
     """Return a valid index dict with all required keys."""
+    stored_list_id = data.get("list_id")
+    if stored_list_id:
+        resolved_list_id = stored_list_id
+    elif _config.TMDB_LIST_ID:
+        resolved_list_id = int(_config.TMDB_LIST_ID)
+    else:
+        resolved_list_id = 0
+
     return {
         "schema_version": CURRENT_INDEX_SCHEMA,
-        "list_id": data.get("list_id") if data.get("list_id") else int(TMDB_LIST_ID) if TMDB_LIST_ID else 0,
+        "list_id": resolved_list_id,
         "list_name": data.get("list_name", ""),
         "last_fast_scan": data.get("last_fast_scan", ""),
         "last_full_scan": data.get("last_full_scan", ""),
@@ -103,6 +112,23 @@ def validate_movie_id(movie_id: int | str) -> int:
     return value
 
 
+def build_membership_record(movie: dict) -> dict:
+    """Build a normalized membership record from a TMDB movie summary."""
+    return {
+        "id": int(movie["id"]),
+        "title": (movie.get("title") or "").strip(),
+        "title_original": (movie.get("original_title") or "").strip(),
+        "title_english": "",
+        "title_german": "",
+        "release_date": (movie.get("release_date") or "").strip(),
+        "poster_path": movie.get("poster_path") or None,
+        "poster_file": None,
+        "status": "",
+        "gone": False,
+        "remote_push": "skipped",
+    }
+
+
 def validate_membership_record(record: dict) -> None:
     """Validate a movie record before it enters the index."""
     if not isinstance(record, dict):
@@ -118,7 +144,7 @@ def validate_membership_record(record: dict) -> None:
 
 def now_iso() -> str:
     """Return current UTC time as ISO 8601 string."""
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def ensure_record_exists(index: dict, details: dict, movie_id: int) -> tuple[dict, dict]:

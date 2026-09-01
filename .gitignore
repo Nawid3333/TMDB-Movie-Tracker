@@ -30,3 +30,15 @@ dmypy.json
 *.log
 *.log.*
 /data
+/tests/data/
+/tests/fixtures/
+*.json
+logs/
+.ruff_cache
+
+# Coverage output (pytest --cov)
+.coverage
+.coverage.*
+coverage.json
+coverage.xml
+htmlcov/

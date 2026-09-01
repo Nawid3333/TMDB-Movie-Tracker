@@ -4,7 +4,9 @@ import concurrent.futures
 import contextlib
 import json
 import logging
-from datetime import datetime, timezone
+import threading
+import time
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -36,12 +38,11 @@ def _release_year(release_date: str) -> int | None:
 
 
 def _days_since_release(release_date: str) -> int | None:
-    year = _release_year(release_date)
-    if not year:
+    if not release_date:
         return None
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     try:
-        release = datetime(year, 1, 1, tzinfo=timezone.utc).date()
+        release = datetime.fromisoformat(release_date).replace(tzinfo=UTC).date()
         return (today - release).days
     except ValueError:
         return None
@@ -79,7 +80,7 @@ def _should_enrich(record: dict, details: dict, force: bool = False) -> bool:
         return True
     try:
         enriched = datetime.fromisoformat(enriched_at.replace("Z", "+00:00"))
-        days = (datetime.now(timezone.utc) - enriched).days
+        days = (datetime.now(UTC) - enriched).days
     except ValueError:
         return True
     if tier == "cool":
@@ -127,18 +128,51 @@ def _fetch_keyword_tv(client: TMDBClient, keyword_id: int) -> list[dict]:
         return []
 
 
+class _LockedCache:
+    """Small thread-safe cache wrapper used by the worker pool."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._data: dict[int, dict] = {}
+
+    def get(self, key: int) -> dict | None:
+        with self._lock:
+            return self._data.get(key)
+
+    def set(self, key: int, value: dict | None) -> None:
+        with self._lock:
+            self._data[key] = value
+
+
+class _LockedListCache:
+    """Thread-safe cache for list-of-dict values."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._data: dict[int, list[dict]] = {}
+
+    def get(self, key: int) -> list[dict] | None:
+        with self._lock:
+            return self._data.get(key)
+
+    def set(self, key: int, value: list[dict]) -> None:
+        with self._lock:
+            self._data[key] = value
+
+
 def _resolve_collection(
     client: TMDBClient,
     membership: dict,
     details: dict,
-    collection_cache: dict[int, dict],
+    collection_cache: _LockedCache,
 ) -> None:
     collection_id = (details.get("collection") or {}).get("id")
     if not collection_id:
         return
-    if collection_id not in collection_cache:
-        collection_cache[collection_id] = _fetch_collection(client, collection_id)
     cached = collection_cache.get(collection_id)
+    if cached is None:
+        collection_cache.set(collection_id, _fetch_collection(client, collection_id))
+        cached = collection_cache.get(collection_id)
     if cached:
         details["collection"] = cached
 
@@ -147,7 +181,7 @@ def _resolve_connected_tv(
     client: TMDBClient,
     membership: dict,
     details: dict,
-    keyword_tv_cache: dict[int, list[dict]],
+    keyword_tv_cache: _LockedListCache,
 ) -> None:
     keywords = details.get("keywords", [])
     if not keywords:
@@ -160,9 +194,11 @@ def _resolve_connected_tv(
         kw_name = kw.get("name", "")
         if not kw_id:
             continue
-        if kw_id not in keyword_tv_cache:
-            keyword_tv_cache[kw_id] = _fetch_keyword_tv(client, kw_id)
-        for series in keyword_tv_cache.get(kw_id, []):
+        cached = keyword_tv_cache.get(kw_id)
+        if cached is None:
+            keyword_tv_cache.set(kw_id, _fetch_keyword_tv(client, kw_id))
+            cached = keyword_tv_cache.get(kw_id)
+        for series in cached or []:
             connected.append(
                 {
                     "id": series["id"],
@@ -190,15 +226,11 @@ def _extract_titles(movie: dict, language: str = TMDB_LANGUAGE) -> dict[str, str
     german = ""
     original_lang = (movie.get("original_language") or "").lower()
 
-    if language.lower().startswith("de"):
-        german = local
+    german = local if language.lower().startswith("de") else ""
+
     if language.lower().startswith("en"):
         english = local
-    if original and not english and original_lang.startswith("en"):
-        english = original
-
-    # If we still have no English title but the original is English, use original.
-    if not english and original_lang.startswith("en"):
+    elif original_lang.startswith("en"):
         english = original or local
 
     return {
@@ -213,8 +245,8 @@ def _enrich_one(
     client: TMDBClient,
     membership: dict,
     details: dict,
-    collection_cache: dict[int, dict],
-    keyword_tv_cache: dict[int, list[dict]],
+    collection_cache: _LockedCache,
+    keyword_tv_cache: _LockedListCache,
     image_client: Any,
 ) -> None:
     """Fetch and merge full details for a single movie."""
@@ -367,11 +399,12 @@ def run_full_scan(
         save_index(index)
         return
 
-    collection_cache: dict[int, dict] = {}
-    keyword_tv_cache: dict[int, list[dict]] = {}
+    collection_cache = _LockedCache()
+    keyword_tv_cache = _LockedListCache()
 
-    image_client: Any = httpx.Client(timeout=30)
+    image_client: Any | None = None
     try:
+        image_client = httpx.Client(timeout=30)
         with concurrent.futures.ThreadPoolExecutor(max_workers=TMDB_DETAIL_WORKERS) as executor:
             futures = {}
             for movie_id, _key in todo:
@@ -387,22 +420,29 @@ def run_full_scan(
                 )
                 futures[future] = movie_id
 
+            checkpoint_interval = 60.0  # seconds
+            last_checkpoint = time.monotonic()
             for future in concurrent.futures.as_completed(futures):
                 movie_id = futures[future]
                 try:
                     future.result()
                     done.add(movie_id)
-                    _save_checkpoint(done)
+                    now = time.monotonic()
+                    if now - last_checkpoint >= checkpoint_interval:
+                        _save_checkpoint(done)
+                        last_checkpoint = now
                     logger.debug("Enriched %s", movie_id)
                 except Exception as exc:
                     logger.error("Failed to enrich %s: %s", movie_id, exc)
-                    # Continue; incomplete flag is handled by caller if needed.
+                    # Do not add to checkpoint so resume can retry this movie.
     finally:
-        image_client.close()
+        if image_client is not None:
+            image_client.close()
 
     index["last_full_scan"] = now_iso()
     details["last_full_scan"] = now_iso()
     save_index(index)
     save_details(details)
     _save_checkpoint(set())
-    print(f"Full scan complete. Enriched {len(todo)} movies.")
+    word = "movie" if len(todo) == 1 else "movies"
+    print(f"Full scan complete. Enriched {len(todo)} {word}.")
