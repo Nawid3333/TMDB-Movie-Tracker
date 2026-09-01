@@ -42,3 +42,4 @@ logs/
 coverage.json
 coverage.xml
 htmlcov/
+*.txt

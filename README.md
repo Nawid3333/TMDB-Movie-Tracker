@@ -2,7 +2,9 @@
 
 A small, terminal-driven Python tool that keeps a local mirror of a TMDB custom list, enriched with cast, crew, collections, keywords, certifications, recommendations and connected TV shows. It is built for people who want fast offline lookups, franchise-gap discovery and safe, approved-only updates.
 
-> **Status:** personal project, tested on Windows with Python 3.14. It works, but it is not packaged as a pip-installable application yet. Contributions are welcome.
+> **Status:** personal project, tested on Windows with Python 3.14. It builds as
+> a wheel and installs as a `movie-tracker` command; running it from a clone is
+> still the path most people should take. Contributions are welcome.
 
 ---
 
@@ -23,7 +25,7 @@ A small, terminal-driven Python tool that keeps a local mirror of a TMDB custom 
 
 ```bash
 git clone <repo-url>
-cd TMDB Movie Tracker
+cd "TMDB Movie Tracker"   # the folder name contains a space
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -95,6 +97,46 @@ Enter your choice (0-3):
 ```
 
 ---
+
+### 4. Optional: install it as a command
+
+Building a wheel puts a `movie-tracker` command on your PATH:
+
+```bash
+pip install build
+python -m build
+pip install dist/tmdb_movie_tracker-1.0.0-py3-none-any.whl
+```
+
+Two things are worth knowing before you do.
+
+**Give each program its own virtual environment.** This project ships its code
+as the top-level modules `main`, `src` and `config`, as do its sibling projects.
+Install two of them into the same environment and the second overwrites the
+first — the command still exists, but it silently runs the other program.
+`pipx` creates an isolated environment per application and avoids this entirely:
+
+```bash
+pipx install .
+```
+
+**Tell it where to keep your files.** Once installed, the package lives inside
+`site-packages`, which is no place to keep a `.env` you have to edit by hand.
+Point `TMDB_HOME` at a folder you own, and `.env`, `data/` (index, details,
+posters, caches) and `logs/` all move there:
+
+```bash
+export TMDB_HOME=~/movie-tracker              # Linux / macOS
+$env:TMDB_HOME = "$HOME\movie-tracker"        # Windows (PowerShell)
+
+mkdir -p ~/movie-tracker
+cp .env.example ~/movie-tracker/.env
+```
+
+`TMDB_HOME` has to be a real environment variable. It cannot be set inside
+`.env`, because it is what tells the program where to find that file in the
+first place. Left unset it resolves to the checkout, which is why running from
+a clone needs no configuration at all.
 
 ## How auth works
 
@@ -170,7 +212,7 @@ python -m ruff format --check .
 
 ## Configuration tunables
 
-All values can be set via `.env`:
+All values below can be set via `.env`:
 
 | Variable                       | Default | Purpose                                              |
 | ------------------------------ | ------- | ---------------------------------------------------- |
@@ -187,6 +229,11 @@ All values can be set via `.env`:
 | `POSTER_SIZE`                  | `w342`  | TMDB poster size to download                         |
 
 ---
+
+One variable is deliberately not in that table: `TMDB_HOME` decides where
+`.env`, `data/` and `logs/` live, so it cannot itself be read from `.env`. Unset,
+it resolves to this checkout; set it when you install the package so those do not
+land in site-packages.
 
 ## Privacy & security notes
 

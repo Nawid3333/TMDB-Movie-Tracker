@@ -12,7 +12,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # ==================== DIRECTORIES ====================
-BASE_DIR = Path(__file__).resolve().parent.parent
+# Every path this program reads or writes -- .env, data/, logs/, posters/ --
+# hangs off BASE_DIR, so there is a single thing to point somewhere else.
+#
+# Unset, TMDB_HOME leaves this as the repo checkout exactly as it always was,
+# so running from a clone is byte-for-byte unchanged. Setting it is what makes
+# an installed copy usable: in a venv this file sits inside site-packages,
+# where no user can reasonably find a .env to edit.
+_DEFAULT_HOME = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(os.environ.get("TMDB_HOME") or _DEFAULT_HOME).resolve()
 DATA_DIR = BASE_DIR / "data"
 LOGS_DIR = BASE_DIR / "logs"
 POSTERS_DIR = DATA_DIR / "posters"
@@ -37,7 +45,8 @@ DEFAULT_BATCH_FILE = BASE_DIR / "movie_urls.txt"
 # tunables are available as soon as this module is imported. This matches the
 # pattern used in the other scraper projects and removes the bootstrap-order
 # bug where values were copied before ``.env`` was loaded.
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+ENV_FILE = BASE_DIR / ".env"
+load_dotenv(ENV_FILE)
 
 
 # ==================== API SETTINGS ====================
