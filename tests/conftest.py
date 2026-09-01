@@ -21,7 +21,21 @@ def _load_fixture(rel_path: str) -> dict:
 
 @pytest.fixture
 def fixtures() -> dict[str, dict]:
-    """Load all captured real TMDB fixtures by friendly key."""
+    """Load all captured real TMDB fixtures by friendly key.
+
+    These are captured from the live API and deliberately kept out of git, so
+    a fresh clone does not have them. Skip rather than error in that case: the
+    suite has to stay runnable for anyone who has not captured them, which is
+    every CI run and every new contributor. Regenerate with
+    ``python tests/capture_fixtures.py``.
+    """
+    try:
+        return _all_fixtures()
+    except FileNotFoundError as missing:
+        pytest.skip(f"no captured fixture ({missing.filename}) -- run tests/capture_fixtures.py")
+
+
+def _all_fixtures() -> dict[str, dict]:
     return {
         "list": _load_fixture("lists/list_8678795.json"),
         "movie_9013": _load_fixture("movies/movie_9013.json"),
