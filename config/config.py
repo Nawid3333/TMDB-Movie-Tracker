@@ -49,6 +49,41 @@ ENV_FILE = BASE_DIR / ".env"
 load_dotenv(ENV_FILE)
 
 
+# The credentials template, written on first run by ensure_env_file(). This is
+# the single source of truth for it: tests/test_env_bootstrap.py asserts that
+# .env.example matches, so the shipped example cannot drift from what someone
+# installing the package actually receives.
+ENV_TEMPLATE = """# Fill in the values below. This file is never committed.
+TMDB_API_KEY=your_tmdb_api_key_here
+TMDB_LIST_ID=your_list_id_here
+
+# Optional: session allows private list reads and list writes.
+TMDB_SESSION_ID=
+TMDB_V4_ACCESS_TOKEN=
+TMDB_USERNAME=
+TMDB_PASSWORD=
+
+# Language/region defaults
+TMDB_LANGUAGE=de-DE
+TMDB_FALLBACK_REGION=DE
+"""
+
+
+def ensure_env_file():
+    """Write ENV_TEMPLATE to ENV_FILE if no .env exists there yet.
+
+    Returns the path written, or None when a file was already present -- an
+    existing .env is never read, altered or overwritten. Called from the CLI
+    entry point rather than at import time, because importing this module must
+    stay free of side effects: the test suite imports it constantly.
+    """
+    if ENV_FILE.exists():
+        return None
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ENV_FILE.write_text(ENV_TEMPLATE, encoding="utf-8")
+    return ENV_FILE
+
+
 # ==================== API SETTINGS ====================
 TMDB_API_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_READ_MAX_RETRIES = int(os.getenv("TMDB_READ_MAX_RETRIES", "3"))

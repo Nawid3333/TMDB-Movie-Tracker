@@ -133,7 +133,9 @@ class _LockedCache:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._data: dict[int, dict] = {}
+        # None is a cached value, not a miss: a fetch that came back empty is
+        # remembered so the worker pool does not ask for it again.
+        self._data: dict[int, dict | None] = {}
 
     def get(self, key: int) -> dict | None:
         with self._lock:

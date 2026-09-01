@@ -14,6 +14,7 @@ from config.config import (
     MISMATCH_REPORT_FILE,
     TMDB_LIST_ID,
     bootstrap,
+    ensure_env_file,
     setup_logging,
 )
 from src.changes import apply_changes, detect_changes
@@ -757,6 +758,16 @@ def _run_cli() -> int:
 
     Separate from main() so tests can reach it.
     """
+    # A fresh install has no .env anywhere, so write the template out rather than
+    # leaving the user a filename to hunt for. Deliberately non-fatal: the
+    # credential check further in reports what still needs filling in.
+    created = ensure_env_file()
+    if created:
+        print("")
+        print("Created a credentials file at:")
+        print(f"    {created}")
+        print("Fill in your details there, then run this again.")
+        print("")
     try:
         main()
     except KeyboardInterrupt:
