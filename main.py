@@ -136,8 +136,8 @@ def show_menu() -> None:
     print()
     print(term.style("Menu", term._T.BOLD, term._T.CYAN))
     print("  " + "─" * 52)
-    print("  1. Fast scan       — list membership only (quick)")
-    print("  2. Full scan       — every detail (slow, accurate)")
+    print("  1. Full scan       — every detail (slow, accurate)")
+    print("  2. Fast scan       — list membership only (quick)")
     print("  3. Franchise gaps  — connected films and TV you missed")
     print("  4. Push URL file   — push URLs/IDs to remote list without adding locally")
     print("  0. Exit")
@@ -887,8 +887,8 @@ def main() -> None:
         print(f"  → List ID: {_config.TMDB_LIST_ID}")
 
     actions = {
-        "1": run_fast_scan,
-        "2": run_full_scan,
+        "1": run_full_scan,
+        "2": run_fast_scan,
         "3": run_franchise_gaps,
         "4": run_push_url_file_only,
     }

@@ -89,8 +89,8 @@ python main.py
 
 Menu
   ────────────────────────────────────────────────────
-  1. Fast scan       — list membership only (quick)
-  2. Full scan       — every detail (slow, accurate)
+  1. Full scan       — every detail (slow, accurate)
+  2. Fast scan       — list membership only (quick)
   3. Franchise gaps  — connected films and TV you missed
   0. Exit
 Enter your choice (0-3):
