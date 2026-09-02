@@ -328,6 +328,10 @@ def push_to_tmdb_list(client: TMDBClient, list_id: str | int, movie_id: int) -> 
     """Add a movie to the remote TMDB list.
 
     Returns a dict with 'success' bool and 'remote_push' status string.
+    TMDB sometimes returns HTTP 200 with a JSON body reporting a failure
+    (e.g. status_code 8 "Duplicate entry"). We inspect the body before
+    raising so duplicate/already-present items are reported clearly instead
+    of as a cryptic 403.
     """
     if not client.session_id:
         return {"success": False, "reason": "no session", "remote_push": "skipped"}
@@ -336,13 +340,31 @@ def push_to_tmdb_list(client: TMDBClient, list_id: str | int, movie_id: int) -> 
             f"/list/{list_id}/add_item",
             json_body={"media_id": movie_id},
         )
-        resp.raise_for_status()
-        body = resp.json()
-        status_code = body.get("status_code") if isinstance(body, dict) else None
+        body = resp.json() if resp.text else {}
+        if not isinstance(body, dict):
+            body = {}
+        status_code = body.get("status_code")
+        status_message = body.get("status_message", "unknown")
+
+        # status_code 12 = updated successfully.
         if status_code == 12:
             return {"success": True, "reason": "ok", "remote_push": "ok"}
-        reason = body.get("status_message") if isinstance(body, dict) else "unknown"
-        return {"success": False, "reason": reason, "remote_push": "failed"}
+
+        # status_code 8 = duplicate entry; the movie is already on the list.
+        if status_code == 8:
+            logger.info("Movie %s already on list %s: %s", movie_id, list_id, status_message)
+            return {"success": True, "reason": status_message, "remote_push": "duplicate"}
+
+        # Any other TMDB JSON status is a real failure; raise so the real message is logged.
+        if status_code is not None:
+            raise httpx.HTTPStatusError(
+                f"TMDB error {status_code}: {status_message}",
+                request=resp.request,
+                response=resp,
+            )
+
+        resp.raise_for_status()
+        return {"success": True, "reason": "ok", "remote_push": "ok"}
     except httpx.HTTPError as exc:
         logger.error("Remote push failed: %s", exc)
         return {"success": False, "reason": str(exc), "remote_push": "failed"}

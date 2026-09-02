@@ -105,3 +105,41 @@ class TestPushToTmdbList:
         assert result["success"] is True
         assert result["remote_push"] == "ok"
         assert route.called
+
+    @respx.mock
+    def test_duplicate_push_reported_successfully(self, client: TMDBClient) -> None:
+        client.session_id = "fake_session"
+        route = respx.post("https://api.themoviedb.org/3/list/8678795/add_item").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "success": False,
+                    "status_code": 8,
+                    "status_message": "Duplicate entry: The item you are trying to add is already on your list.",
+                },
+            )
+        )
+        result = push_to_tmdb_list(client, 8678795, 550)
+        assert result["success"] is True
+        assert result["remote_push"] == "duplicate"
+        assert "already" in result["reason"].lower()
+        assert route.called
+
+    @respx.mock
+    def test_other_tmdb_error_push(self, client: TMDBClient) -> None:
+        client.session_id = "fake_session"
+        route = respx.post("https://api.themoviedb.org/3/list/8678795/add_item").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "success": False,
+                    "status_code": 5,
+                    "status_message": "Invalid format for the given parameters.",
+                },
+            )
+        )
+        result = push_to_tmdb_list(client, 8678795, 550)
+        assert result["success"] is False
+        assert result["remote_push"] == "failed"
+        assert "TMDB error 5" in result["reason"]
+        assert route.called
