@@ -14,7 +14,6 @@ from config.config import (
     LOG_FILE,
     MIN_SHRINK_RATIO,
     MISMATCH_REPORT_FILE,
-    TMDB_LIST_ID,
     bootstrap,
     ensure_env_file,
     setup_logging,
@@ -26,8 +25,6 @@ from src.index import load_index, now_iso, save_index
 from src.list_fetcher import ListFetchError, fetch_list
 from src.search import (
     SearchError,
-    add_movie_locally,
-    fetch_full_movie,
     push_to_tmdb_list,
     resolve_movie_id_from_input,
     resolve_movie_ids_from_file,
@@ -142,8 +139,7 @@ def show_menu() -> None:
     print("  1. Fast scan       — list membership only (quick)")
     print("  2. Full scan       — every detail (slow, accurate)")
     print("  3. Franchise gaps  — connected films and TV you missed")
-    print("  4. Add from URL file — add movies from a text file of URLs/IDs")
-    print("  5. Push URL file only — push URLs/IDs to remote list without adding locally")
+    print("  4. Push URL file   — push URLs/IDs to remote list without adding locally")
     print("  0. Exit")
 
 
@@ -524,135 +520,14 @@ def _select_batch_source() -> str:
     return user_input
 
 
-def _enrich_records(client: TMDBClient, records: list[dict]) -> list[tuple[dict, dict]]:
-    """Fetch full details for each record and return (membership, detail) pairs."""
-    import httpx
-
-    pairs: list[tuple[dict, dict]] = []
-    with httpx.Client(timeout=30) as image_client:
-        for i, record in enumerate(records, 1):
-            movie_id = int(record["id"])
-            try:
-                membership, detail = fetch_full_movie(client, movie_id, image_client)
-            except Exception as exc:
-                log.warning("Could not enrich movie %s: %s", movie_id, exc)
-                print(f"  ⚠ Could not enrich {title_line(record)}: {exc}")
-                continue
-            pairs.append((membership, detail))
-            if i % 10 == 0:
-                print(f"  ... enriched {i}/{len(records)}")
-    return pairs
-
-
-def run_add_from_url_file(client: TMDBClient) -> None:
-    """Add movies to the local index (and optionally the remote list) from a text file."""
-    log.debug("Add from URL file selected")
-    print()
-    print(term.style("→ Add from URL file", term._T.BOLD, term._T.CYAN))
-
-    source = _select_batch_source()
-    if not source:
-        print("  → Cancelled")
-        return
-
-    records: list[dict] = []
-    skipped: list[tuple[int, str, str]] = []
-
-    if os.path.exists(source):
-        if os.path.isdir(source):
-            print(term.style(f"✗ Path is a directory: {source}", term._T.RED))
-            return
-        try:
-            records, skipped = resolve_movie_ids_from_file(client, source)
-        except SearchError as exc:
-            log.error("Failed to read URL file: %s", exc)
-            print(term.style(f"✗ Failed to read file: {exc}", term._T.RED))
-            return
-    else:
-        single = resolve_movie_id_from_input(client, source)
-        if single is None:
-            print(term.style(f"✗ Not a valid TMDB/IMDb URL or id: {source}", term._T.RED))
-            return
-        records = [single]
-
-    if skipped:
-        print(term.style(f"\n⚠ Skipped {len(skipped)} invalid line(s):", term._T.YELLOW))
-        for line_num, raw, reason in skipped[:5]:
-            print(f"  Line {line_num}: {raw[:80]!r} — {reason}")
-        if len(skipped) > 5:
-            print(f"  ... and {len(skipped) - 5} more")
-
-    if not records:
-        print(term.style("\n✗ No valid movies found in file.", term._T.RED))
-        return
-
-    print()
-    print(term.style(f"Found {len(records)} movie(s) to add:", term._T.BOLD, term._T.CYAN))
-    for record in records[:10]:
-        print(f"  + {title_line(record)}")
-    if len(records) > 10:
-        print(f"  ... and {len(records) - 10} more")
-
-    if not prompts.confirm("\nAdd these movies to your local index?", default=False):
-        print("  → Cancelled")
-        return
-
-    print("\n  Fetching full details...")
-    pairs = _enrich_records(client, records)
-    if not pairs:
-        print(term.style("\n✗ No movies could be enriched.", term._T.RED))
-        return
-
-    push = False
-    remote_list_id = TMDB_LIST_ID
-    if client.session_id and remote_list_id and len(pairs) <= 50:
-        push = prompts.confirm(
-            f"Push these {len(pairs)} movie(s) to the remote TMDB list {remote_list_id}?",
-            default=False,
-        )
-
-    added_count = 0
-    push_ok = 0
-    push_fail = 0
-    for membership, detail in pairs:
-        try:
-            add_movie_locally(membership, detail)
-            added_count += 1
-        except Exception as exc:
-            log.warning("Could not save movie %s: %s", membership.get("id"), exc)
-            print(f"  ⚠ Could not save {title_line(membership)}: {exc}")
-            continue
-
-        if push:
-            result = push_to_tmdb_list(client, remote_list_id, int(membership["id"]))
-            if result["success"]:
-                membership["remote_push"] = "ok"
-                push_ok += 1
-            else:
-                membership["remote_push"] = "failed"
-                push_fail += 1
-            # Update the local record with the push status.
-            index = load_index()
-            index["movies"][str(membership["id"])]["remote_push"] = membership["remote_push"]
-            save_index(index)
-
-    print()
-    print(term.style(f"✓ Added {added_count} movie(s) locally.", term._T.GREEN))
-    if push:
-        print(f"  Remote push: {push_ok} ok, {push_fail} failed")
-
-    if added_count and prompts.confirm("\nVerify against the live TMDB list now?", default=True):
-        _fetch_and_summarize_mismatches(client, added_ids={int(m["id"]) for m, _ in pairs})
-        # Backend vanished cleanup after batch add verification.
-        items, _ = fetch_list(client, remote_list_id)
-        _prompt_clean_vanished(client, items)
-
-
 def run_push_url_file_only(client: TMDBClient) -> None:
-    """Push IDs/URLs from a text file to the remote list without touching the local index."""
+    """Push IDs/URLs from a text file to the remote list without touching the local index.
+
+    Skips movies that are already on the live TMDB list before attempting any push.
+    """
     log.debug("Push URL file only selected")
     print()
-    print(term.style("→ Push URL file only", term._T.BOLD, term._T.CYAN))
+    print(term.style("→ Push URL file", term._T.BOLD, term._T.CYAN))
 
     remote_list_id = _config.TMDB_LIST_ID
     if not remote_list_id:
@@ -699,21 +574,63 @@ def run_push_url_file_only(client: TMDBClient) -> None:
         print(term.style("\n✗ No valid movies found in file.", term._T.RED))
         return
 
-    print()
-    print(term.style(f"Found {len(records)} movie(s) to push:", term._T.BOLD, term._T.CYAN))
-    for record in records[:10]:
-        print(f"  + {title_line(record)}")
-    if len(records) > 10:
-        print(f"  ... and {len(records) - 10} more")
+    print("\n  Checking the live TMDB list for existing entries...")
+    try:
+        live_items, incomplete = fetch_list(client, remote_list_id)
+    except ListFetchError as exc:
+        log.error("Could not fetch live list before push: %s", exc)
+        print(term.style("✗ Could not fetch the live list:", term._T.RED), str(exc))
+        return
 
-    if not prompts.confirm(f"\nPush these {len(records)} movie(s) to remote list {remote_list_id}?", default=False):
+    live_ids = {int(item.get("id", 0)) for item in live_items if item.get("id")}
+    already_present: list[dict] = []
+    to_push: list[dict] = []
+    for record in records:
+        if int(record["id"]) in live_ids:
+            already_present.append(record)
+        else:
+            to_push.append(record)
+
+    if already_present:
+        print(
+            term.style(
+                f"⚠ {len(already_present)} movie(s) already on the list and will be skipped:",
+                term._T.YELLOW,
+            )
+        )
+        for record in already_present[:10]:
+            print(f"    - {title_line(record)}")
+        if len(already_present) > 10:
+            print(f"    ... and {len(already_present) - 10} more")
+        if incomplete:
+            print(
+                term.style(
+                    "  (List fetch was incomplete; some already-present matches may have been missed.)",
+                    term._T.YELLOW,
+                )
+            )
+
+    if not to_push:
+        print()
+        print(term.style("✓ Nothing new to push.", term._T.GREEN))
+        print("  → Run option 1 (Fast scan) to pull the list into your local index.")
+        return
+
+    print()
+    print(term.style(f"Found {len(to_push)} movie(s) to push:", term._T.BOLD, term._T.CYAN))
+    for record in to_push[:10]:
+        print(f"  + {title_line(record)}")
+    if len(to_push) > 10:
+        print(f"  ... and {len(to_push) - 10} more")
+
+    if not prompts.confirm(f"\nPush these {len(to_push)} movie(s) to remote list {remote_list_id}?", default=False):
         print("  → Cancelled")
         return
 
     push_ok = 0
     push_fail = 0
     duplicates = 0
-    for record in records:
+    for record in to_push:
         movie_id = int(record["id"])
         result = push_to_tmdb_list(client, remote_list_id, movie_id)
         if result["remote_push"] == "ok":
@@ -724,12 +641,15 @@ def run_push_url_file_only(client: TMDBClient) -> None:
             push_fail += 1
 
     print()
+    total_processed = len(to_push)
     print(
         term.style(
-            f"Pushed {len(records)} movie(s): {push_ok} ok, {duplicates} already present, {push_fail} failed.",
+            f"Pushed {total_processed} movie(s): {push_ok} ok, {duplicates} already present, {push_fail} failed.",
             term._T.GREEN,
         )
     )
+    if already_present:
+        print(f"  {len(already_present)} already on the list were skipped before pushing.")
     print("  → Run option 1 (Fast scan) to pull the list into your local index.")
 
 
@@ -970,8 +890,7 @@ def main() -> None:
         "1": run_fast_scan,
         "2": run_full_scan,
         "3": run_franchise_gaps,
-        "4": run_add_from_url_file,
-        "5": run_push_url_file_only,
+        "4": run_push_url_file_only,
     }
 
     with TMDBClient() as client:
@@ -989,7 +908,7 @@ def main() -> None:
         while True:
             show_menu()
             try:
-                choice = input("Enter your choice (0-5): ").strip()
+                choice = input("Enter your choice (0-4): ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 log.info("Goodbye!")
@@ -1003,7 +922,7 @@ def main() -> None:
 
             action = actions.get(choice)
             if action is None:
-                print(term.style("✗ Invalid choice.", term._T.RED), "Please enter a number between 0 and 5.")
+                print(term.style("✗ Invalid choice.", term._T.RED), "Please enter a number between 0 and 4.")
                 continue
 
             try:

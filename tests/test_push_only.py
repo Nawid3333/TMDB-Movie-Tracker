@@ -25,6 +25,20 @@ class TestPushUrlFileOnly:
         respx.get("https://api.themoviedb.org/3/movie/551").mock(
             return_value=httpx.Response(200, json={"id": 551, "title": "The Crying Game"})
         )
+
+        # Mock the live list fetch so nothing is already present.
+        respx.get("https://api.themoviedb.org/3/list/8678795").mock(
+            side_effect=lambda request: httpx.Response(
+                200,
+                json={
+                    "id": 8678795,
+                    "item_count": 0,
+                    "items": [],
+                    "total_pages": 1,
+                },
+            )
+        )
+
         respx.post("https://api.themoviedb.org/3/list/8678795/add_item").mock(
             side_effect=lambda request: httpx.Response(200, json={"status_code": 12})
         )
@@ -58,6 +72,19 @@ class TestPushUrlFileOnly:
         )
         respx.get("https://api.themoviedb.org/3/movie/551").mock(
             return_value=httpx.Response(200, json={"id": 551, "title": "The Crying Game"})
+        )
+
+        # Live list is empty so both records are eligible to push.
+        respx.get("https://api.themoviedb.org/3/list/8678795").mock(
+            side_effect=lambda request: httpx.Response(
+                200,
+                json={
+                    "id": 8678795,
+                    "item_count": 0,
+                    "items": [],
+                    "total_pages": 1,
+                },
+            )
         )
 
         call_count = {"n": 0}
@@ -123,6 +150,17 @@ class TestPushUrlFileOnly:
         respx.get("https://api.themoviedb.org/3/movie/550").mock(
             return_value=httpx.Response(200, json={"id": 550, "title": "Fight Club"})
         )
+        respx.get("https://api.themoviedb.org/3/list/8678795").mock(
+            side_effect=lambda request: httpx.Response(
+                200,
+                json={
+                    "id": 8678795,
+                    "item_count": 0,
+                    "items": [],
+                    "total_pages": 1,
+                },
+            )
+        )
         route = respx.post("https://api.themoviedb.org/3/list/8678795/add_item")
 
         monkeypatch.setattr("builtins.input", lambda prompt="": str(source))
@@ -134,3 +172,49 @@ class TestPushUrlFileOnly:
         captured = capsys.readouterr()
         assert "Pushed" not in captured.out
         assert not route.called
+
+    @respx.mock
+    def test_skips_ids_already_on_live_list(self, tmp_path, tmp_project, client, monkeypatch, capsys):
+        """Movies already present on the live list are skipped before pushing."""
+        from main import run_push_url_file_only
+
+        source = tmp_path / "push_urls.txt"
+        source.write_text("550\n551\n", encoding="utf-8")
+
+        respx.get("https://api.themoviedb.org/3/movie/550").mock(
+            return_value=httpx.Response(200, json={"id": 550, "title": "Fight Club"})
+        )
+        respx.get("https://api.themoviedb.org/3/movie/551").mock(
+            return_value=httpx.Response(200, json={"id": 551, "title": "The Crying Game"})
+        )
+
+        # The live list already contains 550; only 551 should be pushed.
+        respx.get("https://api.themoviedb.org/3/list/8678795").mock(
+            side_effect=lambda request: httpx.Response(
+                200,
+                json={
+                    "id": 8678795,
+                    "item_count": 1,
+                    "items": [{"id": 550, "title": "Fight Club", "media_type": "movie"}],
+                    "total_pages": 1,
+                },
+            )
+        )
+
+        route = respx.post("https://api.themoviedb.org/3/list/8678795/add_item").mock(
+            side_effect=lambda request: httpx.Response(200, json={"status_code": 12})
+        )
+
+        monkeypatch.setattr("builtins.input", lambda prompt="": str(source))
+        monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
+        monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
+
+        client.session_id = "fake_session"
+
+        run_push_url_file_only(client)
+
+        captured = capsys.readouterr()
+        assert "1 movie(s) already on the list and will be skipped" in captured.out
+        assert "Pushed 1 movie(s): 1 ok, 0 already present, 0 failed" in captured.out
+        assert "1 already on the list were skipped before pushing" in captured.out
+        assert route.call_count == 1
