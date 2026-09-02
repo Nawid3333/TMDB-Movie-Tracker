@@ -4,8 +4,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 
+import src.enrich as enrich_mod
 from src.enrich import (
     _days_since_release,
     _enrich_one,
@@ -17,7 +19,7 @@ from src.enrich import (
     _should_enrich,
     _volatility_tier,
 )
-from src.index import ensure_record_exists, load_index
+from src.index import ensure_record_exists, load_index, save_index
 from src.tmdb_api import TMDBClient
 
 
@@ -118,3 +120,51 @@ class TestEnrichOne:
         _enrich_one(client, membership, detail, _LockedCache(), _LockedListCache(), fake_image_client)
         assert membership["gone"] is True
         assert "gone_since" in membership
+
+
+class TestRunFullScanReporting:
+    """Full scan must name which movies it touched, not just print a count."""
+
+    def test_reports_enriched_gone_and_failed_titles(
+        self,
+        tmp_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        client: TMDBClient,
+    ) -> None:
+        save_index(
+            {
+                "movies": {
+                    "1": {"id": 1, "title": "Movie One", "release_date": "2020-01-01"},
+                    "2": {"id": 2, "title": "Movie Two", "release_date": "2021-01-01"},
+                    "3": {"id": 3, "title": "Movie Three", "release_date": "2022-01-01"},
+                }
+            }
+        )
+
+        def fake_enrich_one(_client, membership, _detail, _coll_cache, _kw_cache, _image_client):
+            if membership["id"] == 2:
+                membership["gone"] = True
+                membership["gone_since"] = "2026-01-01T00:00:00Z"
+                return
+            if membership["id"] == 3:
+                raise RuntimeError("boom")
+            membership["title"] = membership["title"] + " (enriched)"
+
+        monkeypatch.setattr(enrich_mod, "_enrich_one", fake_enrich_one)
+
+        enrich_mod.run_full_scan(client, force=True, resume=False)
+
+        out = capsys.readouterr().out
+        assert "Movie One (enriched) (2020)" in out
+        assert "Movie Two (2021)" in out
+        assert "no longer on TMDB, marked gone" in out
+        assert "Movie Three (2022)" in out
+        assert "boom" in out
+        assert "Full scan complete. Enriched 1 movie." in out
+        assert "1 marked gone" in out
+        assert "1 failed" in out
+
+        saved = load_index()
+        assert saved["movies"]["1"]["title"] == "Movie One (enriched)"
+        assert saved["movies"]["2"]["gone"] is True

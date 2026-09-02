@@ -22,6 +22,7 @@ from src.atomic_io import atomic_write_json
 from src.index import ensure_record_exists, load_details, load_index, now_iso, save_details, save_index
 from src.posters import download_poster
 from src.tmdb_api import TMDBClient, pick_certification
+from src.ui.reports import title_line
 
 logger = logging.getLogger(__name__)
 
@@ -401,16 +402,24 @@ def run_full_scan(
         save_index(index)
         return
 
+    word = "movie" if len(todo) == 1 else "movies"
+    print(f"Enriching {len(todo)} {word}...")
+
     collection_cache = _LockedCache()
     keyword_tv_cache = _LockedListCache()
 
     image_client: Any | None = None
+    enriched: list[str] = []
+    gone: list[str] = []
+    failed: list[str] = []
     try:
         image_client = httpx.Client(timeout=30)
         with concurrent.futures.ThreadPoolExecutor(max_workers=TMDB_DETAIL_WORKERS) as executor:
             futures = {}
+            membership_by_id: dict[int, dict] = {}
             for movie_id, _key in todo:
                 membership, detail = ensure_record_exists(index, details, movie_id)
+                membership_by_id[movie_id] = membership
                 future = executor.submit(
                     _enrich_one,
                     client,
@@ -426,6 +435,7 @@ def run_full_scan(
             last_checkpoint = time.monotonic()
             for future in concurrent.futures.as_completed(futures):
                 movie_id = futures[future]
+                membership = membership_by_id[movie_id]
                 try:
                     future.result()
                     done.add(movie_id)
@@ -433,9 +443,21 @@ def run_full_scan(
                     if now - last_checkpoint >= checkpoint_interval:
                         _save_checkpoint(done)
                         last_checkpoint = now
+                    # _enrich_one mutates `membership` in place, so the title is
+                    # only reliable to read *after* future.result() returns.
+                    label = title_line(membership) if membership.get("title") else f"#{movie_id}"
+                    if membership.get("gone"):
+                        gone.append(label)
+                        print(f"  ⚠ {label} — no longer on TMDB, marked gone")
+                    else:
+                        enriched.append(label)
+                        print(f"  ✓ {label}")
                     logger.debug("Enriched %s", movie_id)
                 except Exception as exc:
                     logger.error("Failed to enrich %s: %s", movie_id, exc)
+                    label = title_line(membership) if membership.get("title") else f"#{movie_id}"
+                    failed.append(label)
+                    print(f"  ✗ {label} — {exc}")
                     # Do not add to checkpoint so resume can retry this movie.
     finally:
         if image_client is not None:
@@ -446,5 +468,8 @@ def run_full_scan(
     save_index(index)
     save_details(details)
     _save_checkpoint(set())
-    word = "movie" if len(todo) == 1 else "movies"
-    print(f"Full scan complete. Enriched {len(todo)} {word}.")
+    print(f"Full scan complete. Enriched {len(enriched)} {'movie' if len(enriched) == 1 else 'movies'}.")
+    if gone:
+        print(f"  {len(gone)} marked gone (no longer on TMDB).")
+    if failed:
+        print(f"  {len(failed)} failed and will be retried on the next scan.")
