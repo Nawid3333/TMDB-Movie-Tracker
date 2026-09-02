@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tmdb-movie-tracker"
-version = "2.0.2"
+version = "2.1.0"
 description = "Terminal-based TMDB list tracker with local enrichment, franchise gaps, and change detection."
 readme = "README.md"
 license = "GPL-3.0-or-later"
