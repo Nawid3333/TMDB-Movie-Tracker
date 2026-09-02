@@ -105,7 +105,7 @@ Building a wheel puts a `movie-tracker` command on your PATH:
 ```bash
 pip install build
 python -m build
-pip install dist/tmdb_movie_tracker-2.0.2-py3-none-any.whl
+pip install dist/tmdb_movie_tracker-*-py3-none-any.whl
 ```
 
 Two things are worth knowing before you do.
