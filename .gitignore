@@ -36,10 +36,13 @@ dmypy.json
 logs/
 .ruff_cache
 
+# requirements.txt is tracked on purpose; the blanket rule must not hide it.
+*.txt
+!requirements.txt
+
 # Coverage output (pytest --cov)
 .coverage
 .coverage.*
 coverage.json
 coverage.xml
 htmlcov/
-*.txt

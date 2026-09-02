@@ -12,10 +12,8 @@ recursive-include tests *.py
 # The credentials template, so an installed copy has something to copy from.
 include .env.example
 
-# Tracked sample input: a handful of public TMDB URLs.
-include movie_urls.txt
-
-# Never ship. data/ and logs/ are local state; the fixtures are multi-megabyte
+# Never ship. movie_urls.txt is a personal watchlist, not a sample;
+# data/ and logs/ are local state; the fixtures are multi-megabyte
 # captures of the live site, kept out of git for the same reason they are kept
 # out of here; .env holds real credentials.
 prune tests/fixtures
