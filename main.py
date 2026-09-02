@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 import config.config as _config
 from config.config import (
     DEFAULT_BATCH_FILE,
+    GAPS_FILE,
     LOG_FILE,
     MIN_SHRINK_RATIO,
     MISMATCH_REPORT_FILE,
@@ -142,6 +143,7 @@ def show_menu() -> None:
     print("  2. Full scan       — every detail (slow, accurate)")
     print("  3. Franchise gaps  — connected films and TV you missed")
     print("  4. Add from URL file — add movies from a text file of URLs/IDs")
+    print("  5. Push URL file only — push URLs/IDs to remote list without adding locally")
     print("  0. Exit")
 
 
@@ -646,6 +648,91 @@ def run_add_from_url_file(client: TMDBClient) -> None:
         _prompt_clean_vanished(client, items)
 
 
+def run_push_url_file_only(client: TMDBClient) -> None:
+    """Push IDs/URLs from a text file to the remote list without touching the local index."""
+    log.debug("Push URL file only selected")
+    print()
+    print(term.style("→ Push URL file only", term._T.BOLD, term._T.CYAN))
+
+    remote_list_id = _config.TMDB_LIST_ID
+    if not remote_list_id:
+        print(term.style("✗ No TMDB_LIST_ID configured.", term._T.RED))
+        return
+    if not client.session_id:
+        print(term.style("✗ No TMDB session available.", term._T.RED))
+        print("  Restart and approve the TMDB session prompt at startup.")
+        return
+
+    source = _select_batch_source()
+    if not source:
+        print("  → Cancelled")
+        return
+
+    records: list[dict] = []
+    skipped: list[tuple[int, str, str]] = []
+
+    if os.path.exists(source):
+        if os.path.isdir(source):
+            print(term.style(f"✗ Path is a directory: {source}", term._T.RED))
+            return
+        try:
+            records, skipped = resolve_movie_ids_from_file(client, source)
+        except SearchError as exc:
+            log.error("Failed to read URL file: %s", exc)
+            print(term.style(f"✗ Failed to read file: {exc}", term._T.RED))
+            return
+    else:
+        single = resolve_movie_id_from_input(client, source)
+        if single is None:
+            print(term.style(f"✗ Not a valid TMDB/IMDb URL or id: {source}", term._T.RED))
+            return
+        records = [single]
+
+    if skipped:
+        print(term.style(f"\n⚠ Skipped {len(skipped)} invalid line(s):", term._T.YELLOW))
+        for line_num, raw, reason in skipped[:5]:
+            print(f"  Line {line_num}: {raw[:80]!r} — {reason}")
+        if len(skipped) > 5:
+            print(f"  ... and {len(skipped) - 5} more")
+
+    if not records:
+        print(term.style("\n✗ No valid movies found in file.", term._T.RED))
+        return
+
+    print()
+    print(term.style(f"Found {len(records)} movie(s) to push:", term._T.BOLD, term._T.CYAN))
+    for record in records[:10]:
+        print(f"  + {title_line(record)}")
+    if len(records) > 10:
+        print(f"  ... and {len(records) - 10} more")
+
+    if not prompts.confirm(f"\nPush these {len(records)} movie(s) to remote list {remote_list_id}?", default=False):
+        print("  → Cancelled")
+        return
+
+    push_ok = 0
+    push_fail = 0
+    duplicates = 0
+    for record in records:
+        movie_id = int(record["id"])
+        result = push_to_tmdb_list(client, remote_list_id, movie_id)
+        if result["remote_push"] == "ok":
+            push_ok += 1
+        elif result["remote_push"] == "duplicate":
+            duplicates += 1
+        else:
+            push_fail += 1
+
+    print()
+    print(
+        term.style(
+            f"Pushed {len(records)} movie(s): {push_ok} ok, {duplicates} already present, {push_fail} failed.",
+            term._T.GREEN,
+        )
+    )
+    print("  → Run option 1 (Fast scan) to pull the list into your local index.")
+
+
 def run_clean_vanished(client: TMDBClient) -> None:
     """Find local index movies missing from the remote list and ask to delete or rescrape."""
     log.debug("Clean vanished selected")
@@ -796,6 +883,60 @@ def run_franchise_gaps(_client: TMDBClient) -> None:
         print()
         print(term.style("  ✓ No connected TV series.", term._T.GREEN))
 
+    # Persist / surface the gaps JSON path
+    print()
+    print(f"  Report saved to: {GAPS_FILE}")
+
+    # Offer to export missing franchise film URLs to a text file (append-only, deduplicated).
+    if missing and prompts.confirm("Export missing franchise film URLs to a text file?", default=False):
+        default_target = str(DEFAULT_BATCH_FILE)
+        target = input(f"Target file [default: {default_target}]: ").strip()
+        if not target:
+            target = default_target
+
+        # Use an absolute path consistently for both reading and writing.
+        target_path = os.path.abspath(target)
+
+        existing_lines: list[str] = []
+        if os.path.exists(target_path) and os.path.isfile(target_path):
+            try:
+                with open(target_path, encoding="utf-8") as fh:
+                    existing_lines = [line.rstrip("\n") for line in fh]
+            except OSError as exc:
+                log.warning("Could not read existing target file %s: %s", target_path, exc)
+
+        # Normalize URLs for deduplication while preserving the user's original lines.
+        existing_normalized = {line.strip() for line in existing_lines}
+
+        new_urls: list[str] = []
+        for item in missing:
+            if item.get("source") != "collection":
+                continue
+            url = _gap_url(item)
+            if url.strip() in existing_normalized:
+                continue
+            existing_normalized.add(url.strip())
+            new_urls.append(url)
+
+        if not new_urls:
+            print("  → No new URLs to add (all already present in file).")
+        else:
+            try:
+                # Use a header comment to visually separate an export batch.
+                timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+                header = f"# Franchise gaps export — {timestamp} — {len(new_urls)} URL(s)"
+                os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
+                with open(target_path, "a", encoding="utf-8") as fh:
+                    # Ensure a blank line before the header when appending to existing content.
+                    if existing_lines and existing_lines[-1].strip():
+                        fh.write("\n")
+                    fh.write(header + "\n")
+                    fh.write("\n".join(new_urls) + "\n")
+                print(term.style(f"  ✓ Appended {len(new_urls)} URL(s) to {target_path}", term._T.GREEN))
+            except OSError as exc:
+                log.error("Could not append to %s: %s", target_path, exc)
+                print(term.style(f"  ✗ Could not write to {target_path}: {exc}", term._T.RED))
+
 
 def check_api_key() -> bool:
     """Fail fast if no API key is configured."""
@@ -830,6 +971,7 @@ def main() -> None:
         "2": run_full_scan,
         "3": run_franchise_gaps,
         "4": run_add_from_url_file,
+        "5": run_push_url_file_only,
     }
 
     with TMDBClient() as client:
@@ -847,7 +989,7 @@ def main() -> None:
         while True:
             show_menu()
             try:
-                choice = input("Enter your choice (0-4): ").strip()
+                choice = input("Enter your choice (0-5): ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 log.info("Goodbye!")
@@ -861,7 +1003,7 @@ def main() -> None:
 
             action = actions.get(choice)
             if action is None:
-                print(term.style("✗ Invalid choice.", term._T.RED), "Please enter a number between 0 and 4.")
+                print(term.style("✗ Invalid choice.", term._T.RED), "Please enter a number between 0 and 5.")
                 continue
 
             try:
