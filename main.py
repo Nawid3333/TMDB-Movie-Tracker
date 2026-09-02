@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import shutil
 import sys
 from datetime import UTC, datetime, timedelta
 
@@ -49,6 +50,87 @@ def print_header() -> None:
     ):
         print(line)
     print()
+
+
+def _format_host_rows(hosts):
+    """Return a list of table-formatted host status lines.
+
+    hosts is a list of (label, status, count, idx_count, compare_txt) tuples.
+    Adapted from the aniworld scraper layout; the third column is Movies here.
+    """
+    if not hosts:
+        return []
+
+    term_w = max(shutil.get_terminal_size().columns, 80)
+    arrow_gap = "  "
+
+    labels = ["Host", "Status", "Movies", "Index", "Compare"]
+    cols = {
+        "host": max([len(str(label)) for label, *_ in hosts] + [len(labels[0])]),
+        "status": max([len("OK" if status else "FAILED") for _, status, *_ in hosts] + [len(labels[1])]),
+        "movies": max([len(f"{count:,}") if count is not None else 1 for _, _, count, *_ in hosts] + [len(labels[2])]),
+        "index": max(
+            [len(f"{idx_count:,}") if idx_count is not None else 1 for _, _, _, idx_count, *_ in hosts]
+            + [len(labels[3])]
+        ),
+        "compare": max(
+            [len(str(compare_txt)) if compare_txt is not None else 1 for *_, compare_txt in hosts] + [len(labels[4])]
+        ),
+    }
+
+    total = sum(cols.values()) + len(labels) * len(arrow_gap)
+    if total > term_w:
+        excess = total - term_w
+        trimmable = cols["host"] - len(labels[0]) + cols["compare"] - len(labels[4])
+        if trimmable > 0:
+            factor = min(excess / trimmable, 1.0)
+            cols["host"] = max(
+                len(labels[0]),
+                int(cols["host"] - (cols["host"] - len(labels[0])) * factor),
+            )
+            cols["compare"] = max(
+                len(labels[4]),
+                int(cols["compare"] - (cols["compare"] - len(labels[4])) * factor),
+            )
+
+    def _trunc(text, width):
+        text = str(text)
+        return text if len(text) <= width else text[: width - 1] + "…"
+
+    sep_parts = ["─" * cols["host"]] + ["─" * cols[key] for key in ["status", "movies", "index", "compare"]]
+
+    lines = [
+        arrow_gap
+        + "  ".join(
+            [
+                f"{_trunc(labels[0], cols['host']):<{cols['host']}}",
+                f"{labels[1]:<{cols['status']}}",
+                f"{labels[2]:<{cols['movies']}}",
+                f"{labels[3]:<{cols['index']}}",
+                f"{labels[4]:<{cols['compare']}}",
+            ]
+        ),
+        arrow_gap + "  ".join(sep_parts),
+    ]
+
+    for label, status, count, idx_count, compare_txt in hosts:
+        status_txt = "OK" if status else "FAILED"
+        count_txt = f"{count:,}" if count is not None else "-"
+        idx_txt = f"{idx_count:,}" if idx_count is not None else "-"
+        cmp_txt = compare_txt if compare_txt is not None else "-"
+        lines.append(
+            arrow_gap
+            + "  ".join(
+                [
+                    f"{_trunc(label, cols['host']):<{cols['host']}}",
+                    f"{status_txt:<{cols['status']}}",
+                    f"{count_txt:<{cols['movies']}}",
+                    f"{idx_txt:<{cols['index']}}",
+                    f"{_trunc(cmp_txt, cols['compare']):<{cols['compare']}}",
+                ]
+            )
+        )
+    return lines
 
 
 def show_menu() -> None:
@@ -352,6 +434,49 @@ def _render_mismatch_summary(
 
     if missing_from_list and not added_ids:
         print(term.style("\n⚠ Some local movies are not on the remote list.", term._T.YELLOW))
+
+
+def _compare_text(count: int, idx_count: int) -> str:
+    """Return 'match' or 'mismatch (±N)' for the startup table."""
+    diff = idx_count - count
+    if diff == 0:
+        return "match"
+    sign = "+" if diff > 0 else ""
+    return f"mismatch ({sign}{diff})"
+
+
+def _probe_tmdb_status(client: TMDBClient, index: dict) -> None:
+    """Fetch the live TMDB list, compare counts with the local index, and print a table."""
+    label = "tmdb.org"
+    list_id = _config.TMDB_LIST_ID
+
+    if not list_id:
+        host_row = (label, False, None, len(index.get("movies", {})), "no list id")
+        for line in _format_host_rows([host_row]):
+            print(line)
+        return
+
+    try:
+        items, incomplete = fetch_list(client, list_id)
+    except ListFetchError as exc:
+        log.error("Startup list probe failed: %s", exc)
+        host_row = (label, False, None, len(index.get("movies", {})), "fetch failed")
+        for line in _format_host_rows([host_row]):
+            print(line)
+        return
+
+    live_count = len(items)
+    idx_count = len(index.get("movies", {}))
+    # `incomplete` is the only real failure signal here -- a complete fetch of a
+    # genuinely empty list is a successful probe, not a failed one.
+    status = not incomplete
+    compare = _compare_text(live_count, idx_count)
+    host_row = (label, status, live_count, idx_count, compare)
+
+    for line in _format_host_rows([host_row]):
+        print(line)
+
+    _save_mismatch_report(index, items, set())
 
 
 def _fetch_and_summarize_mismatches(client: TMDBClient, *, added_ids: set[int] | None = None) -> None:
@@ -715,6 +840,9 @@ def main() -> None:
             print(term.style("  ✓ TMDB session available", term._T.GREEN))
         else:
             print("  → No TMDB session; writes that require auth are disabled")
+
+        # Probe the live list and compare its size to the local index at startup.
+        _probe_tmdb_status(client, index)
 
         while True:
             show_menu()
