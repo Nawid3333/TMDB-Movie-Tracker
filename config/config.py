@@ -6,6 +6,7 @@ Loads environment variables, sets paths, and provides tunables.
 import contextlib
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -145,7 +146,10 @@ def setup_logging() -> logging.Logger:
     fh.setFormatter(term.PlainFormatter("%(asctime)s [%(levelname)s] %(message)s"))
 
     # Console: warnings yellow, errors red, criticals magenta.
-    ch = logging.StreamHandler()
+    # Route to stdout so log lines and print()/input() share one ordered
+    # stream; stderr would interleave with the menu prompt and echo input
+    # mid-scroll.
+    ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
     ch.setFormatter(term.ColorFormatter("%(message)s"))
 

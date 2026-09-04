@@ -8,7 +8,7 @@ from pathlib import Path
 import config.config as _config
 from config.config import DATA_DIR
 from src.atomic_io import atomic_write_json
-from src.tmdb_api import TMDBClient
+from src.tmdb_api import _TMDBClientLike
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ def _list_cache_path(list_id: str | int, data_dir: Path) -> Path:
     return data_dir / f"list_{list_id}_fast.json"
 
 
-def _fetch_page(client: TMDBClient, list_id: str | int, page: int, *, auth: bool = False) -> dict:
+def _fetch_page(client: _TMDBClientLike, list_id: str | int, page: int, *, auth: bool = False) -> dict:
     """Fetch a single page of the list."""
     resp = client.get(f"/list/{list_id}", params={"page": page}, auth=auth)
     resp.raise_for_status()
@@ -32,7 +32,7 @@ def _fetch_page(client: TMDBClient, list_id: str | int, page: int, *, auth: bool
 
 
 def fetch_list(
-    client: TMDBClient,
+    client: _TMDBClientLike,
     list_id: str | int | None = None,
     *,
     cache_path: Path | None = None,
@@ -82,39 +82,19 @@ def fetch_list(
                     )
                     incomplete = True
                 break
+
             items.extend(page_items)
-
-            # Derive page count from item_count when total_pages is unreliable.
-            item_count = data.get("item_count")
-            if isinstance(item_count, int) and item_count > 0:
-                expected_items = item_count
-                derived_total = (item_count + 19) // 20  # 20 per page
-                total_pages = max(total_pages, derived_total)
-
-            reported_total = data.get("total_pages")
-            if isinstance(reported_total, int) and reported_total > 0:
-                if reported_total != total_pages and page == 1:
-                    logger.debug(
-                        "total_pages (%d) differs from item_count derived (%d); using derived",
-                        reported_total,
-                        total_pages,
-                    )
-                total_pages = max(total_pages, reported_total)
-
+            if expected_items is None:
+                expected_items = data.get("item_count")
+                total_pages = data.get("total_pages") or total_pages
             page += 1
-            if page > 500:
-                logger.warning("List pagination capped at 500 pages / 10,000 items")
-                incomplete = True
-                break
 
-        # Final proof that the fetch is whole. Every early exit above sets the
-        # flag for its own reason; this catches the rest -- pages that came
-        # back under-filled, or a list that shrank while it was being read --
-        # because the count the list reported is the only thing that knows how
-        # many items there should have been.
+        # If the list reports a total item count, double-check that we really
+        # got that many. A broken stream might never deliver a blank page but
+        # still under-fill every page.
         if expected_items is not None and len(items) < expected_items:
-            logger.error(
-                "List reported %d items but only %d were read; treating the fetch as incomplete",
+            logger.warning(
+                "List fetch short read: expected %d items, got %d",
                 expected_items,
                 len(items),
             )
@@ -123,16 +103,11 @@ def fetch_list(
         return items, incomplete
 
     items, incomplete = _try_fetch(auth=False)
-
-    # If API-key-only fetch failed (incomplete), try with a session (private list).
-    # A genuinely empty public list should not trigger a session upgrade.
     if not items and incomplete and use_session_on_private:
         logger.info("List fetch looks private; attempting session upgrade")
         session_id = client.ensure_session()
         if session_id:
             items, incomplete = _try_fetch(auth=True)
-        else:
-            logger.warning("No session available; private list reads will fail")
 
     if cache_path is None:
         cache_path = _list_cache_path(list_id, DATA_DIR)

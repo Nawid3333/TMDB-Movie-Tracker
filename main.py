@@ -30,7 +30,7 @@ from src.search import (
     resolve_movie_id_from_input,
     resolve_movie_ids_from_file,
 )
-from src.tmdb_api import TMDBClient
+from src.tmdb_api import TMDBClient, _TMDBClientLike
 from src.ui import prompts, reports, term
 from src.ui.reports import title_line
 from src.ui.term import cinput as input
@@ -739,7 +739,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
             _fetch_and_summarize_mismatches(client, added_ids=set(rescrape_ids))
 
 
-def run_franchise_gaps(_client: TMDBClient) -> None:
+def run_franchise_gaps(_client: _TMDBClientLike) -> None:
     """Report connected films and TV not in the index."""
     log.debug("Franchise gaps selected")
     print()

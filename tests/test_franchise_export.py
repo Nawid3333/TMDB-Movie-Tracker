@@ -1,9 +1,18 @@
-"""Tests for franchise gaps export to text files."""
-
+import httpx
 import pytest
 
 from src.gaps import find_gaps
 from src.index import save_details, save_index
+
+
+class _FakeClient:
+    session_id: str | None = None
+
+    def get(self, path: str, *, params: dict | None = None, auth: bool = True) -> httpx.Response:
+        raise NotImplementedError
+
+    def ensure_session(self) -> str | None:
+        return None
 
 
 class TestFranchiseGapsExport:
@@ -50,10 +59,7 @@ class TestFranchiseGapsExport:
         monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
 
-        class FakeClient:
-            session_id = None
-
-        run_franchise_gaps(FakeClient())
+        run_franchise_gaps(_FakeClient())
 
         text = target.read_text(encoding="utf-8")
         assert "https://www.themoviedb.org/movie/2" in text
@@ -70,10 +76,7 @@ class TestFranchiseGapsExport:
         monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
 
-        class FakeClient:
-            session_id = None
-
-        run_franchise_gaps(FakeClient())
+        run_franchise_gaps(_FakeClient())
 
         text = target.read_text(encoding="utf-8")
         assert "# Existing" in text
@@ -93,10 +96,7 @@ class TestFranchiseGapsExport:
         monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
 
-        class FakeClient:
-            session_id = None
-
-        run_franchise_gaps(FakeClient())
+        run_franchise_gaps(_FakeClient())
 
         text = target.read_text(encoding="utf-8")
         assert text.count("https://www.themoviedb.org/movie/2") == 1
@@ -111,9 +111,6 @@ class TestFranchiseGapsExport:
         monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: False)
 
-        class FakeClient:
-            session_id = None
-
-        run_franchise_gaps(FakeClient())
+        run_franchise_gaps(_FakeClient())
 
         assert not target.exists()

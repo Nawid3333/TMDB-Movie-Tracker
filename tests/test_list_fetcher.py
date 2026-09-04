@@ -72,19 +72,17 @@ class TestTruncatedFetchIsReportedIncomplete:
     """
 
     def _client(self, blank_page: int, total: int = 100, per: int = 20):
-        class FakeResp:
-            def __init__(self, payload):
-                self._p = payload
-
-            def raise_for_status(self):
-                pass
-
-            def json(self):
-                return self._p
+        class _FakeResp(httpx.Response):
+            def __init__(self, payload: dict) -> None:
+                super().__init__(status_code=200, json=payload, request=httpx.Request("GET", "https://example.com/"))
 
         class FakeClient:
+            session_id: str | None = None
+
             def get(self, path, params=None, auth=False):
-                page = (params or {})["page"]
+                page = (params or {}).get("page")
+                if page is None:
+                    page = 1
                 if page == blank_page:
                     items = []
                 else:
@@ -93,7 +91,7 @@ class TestTruncatedFetchIsReportedIncomplete:
                         {"media_type": "movie", "id": i, "title": f"Movie {i}", "release_date": "2020-01-01"}
                         for i in range(start, min(start + per, total + 1))
                     ]
-                return FakeResp({"items": items, "item_count": total, "total_pages": (total + per - 1) // per})
+                return _FakeResp({"items": items, "item_count": total, "total_pages": (total + per - 1) // per})
 
             def ensure_session(self):
                 return None
@@ -113,25 +111,23 @@ class TestTruncatedFetchIsReportedIncomplete:
     def test_a_short_read_is_caught_even_without_a_blank_page(self, tmp_path: Path) -> None:
         """A server under-filling every page still owes item_count items."""
 
-        class FakeResp:
-            def __init__(self, payload):
-                self._p = payload
-
-            def raise_for_status(self):
-                pass
-
-            def json(self):
-                return self._p
+        class _FakeResp(httpx.Response):
+            def __init__(self, payload: dict) -> None:
+                super().__init__(status_code=200, json=payload, request=httpx.Request("GET", "https://example.com/"))
 
         class Underfilling:
+            session_id: str | None = None
+
             def get(self, path, params=None, auth=False):
-                page = (params or {})["page"]
+                page = (params or {}).get("page")
+                if page is None:
+                    page = 1
                 start = (page - 1) * 10 + 1
                 items = [
                     {"media_type": "movie", "id": i, "title": f"M{i}", "release_date": "2020-01-01"}
                     for i in range(start, min(start + 10, 101))
                 ]
-                return FakeResp({"items": items, "item_count": 100, "total_pages": 5})
+                return _FakeResp({"items": items, "item_count": 100, "total_pages": 5})
 
             def ensure_session(self):
                 return None

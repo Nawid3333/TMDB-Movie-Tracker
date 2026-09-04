@@ -6,7 +6,7 @@ import random
 import threading
 import time
 import webbrowser
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -59,6 +59,22 @@ class TokenBucket:
             time.sleep(sleep_time)
             with self._lock:
                 self.last_update = time.monotonic()
+
+
+class _TMDBClientLike(Protocol):
+    """Minimal TMDB client surface used by fetch_list and main()."""
+
+    session_id: str | None
+
+    def get(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        auth: bool = True,
+    ) -> httpx.Response: ...
+
+    def ensure_session(self) -> str | None: ...
 
 
 class TMDBClient:
