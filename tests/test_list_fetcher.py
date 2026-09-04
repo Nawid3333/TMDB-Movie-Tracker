@@ -84,7 +84,7 @@ class TestTruncatedFetchIsReportedIncomplete:
 
         class FakeClient:
             def get(self, path, params=None, auth=False):
-                page = params["page"]
+                page = (params or {})["page"]
                 if page == blank_page:
                     items = []
                 else:
@@ -125,7 +125,7 @@ class TestTruncatedFetchIsReportedIncomplete:
 
         class Underfilling:
             def get(self, path, params=None, auth=False):
-                page = params["page"]
+                page = (params or {})["page"]
                 start = (page - 1) * 10 + 1
                 items = [
                     {"media_type": "movie", "id": i, "title": f"M{i}", "release_date": "2020-01-01"}

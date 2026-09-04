@@ -39,7 +39,7 @@ def render_detail_card(membership: dict, detail: dict) -> None:
         label = _pluralize(len(directors), "Director")
         lines.append(f"{label}: {_comma_list(directors)}")
 
-    cast = detail.get("cast", [])[:8]
+    cast = detail.get("cast", [])
     if cast:
         lines.append("Cast:")
         for person in cast:
@@ -57,7 +57,7 @@ def render_detail_card(membership: dict, detail: dict) -> None:
     connected_tv = detail.get("connected_tv", [])
     if connected_tv:
         lines.append("Connected TV:")
-        for item in connected_tv[:5]:
+        for item in connected_tv:
             lines.append(f"  {item.get('name', '')} (via {item.get('via_keyword', '')})")
 
     overview = detail.get("overview")

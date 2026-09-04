@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.tmdb_api import TMDBClient
+from src.tmdb_api import TMDBClient  # noqa: E402
 
 PROJECT = Path(__file__).resolve().parent.parent
 FIXTURES = PROJECT / "tests" / "fixtures" / "generated"

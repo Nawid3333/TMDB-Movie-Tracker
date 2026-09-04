@@ -40,6 +40,10 @@ MISMATCH_REPORT_FILE = DATA_DIR / "mismatch_report.json"
 # Default batch file for adding movies from a list of URLs/IDs.
 DEFAULT_BATCH_FILE = BASE_DIR / "movie_urls.txt"
 
+# Dedicated export file for franchise gaps, so gap URLs do not mix with the
+# manual push queue in DEFAULT_BATCH_FILE.
+FRANCHISE_GAPS_EXPORT_FILE = DATA_DIR / "franchise_gaps_urls.txt"
+
 
 # Load the environment file before reading any settings so credentials and
 # tunables are available as soon as this module is imported. This matches the

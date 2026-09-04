@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 import config.config as _config
 from config.config import (
     DEFAULT_BATCH_FILE,
+    FRANCHISE_GAPS_EXPORT_FILE,
     GAPS_FILE,
     LOG_FILE,
     MIN_SHRINK_RATIO,
@@ -263,11 +264,9 @@ def _prompt_clean_vanished(
 
     print()
     print(term.style(f"⚠ {len(missing_ids)} movie(s) in index but missing from the list:", term._T.YELLOW))
-    for movie_id in missing_ids[:10]:
+    for movie_id in missing_ids:
         movie = local_movies.get(str(movie_id), {})
         print(f"    - {title_line(movie)}")
-    if len(missing_ids) > 10:
-        print(f"    ... and {len(missing_ids) - 10} more")
 
     bulk = input("\nDelete all these vanished entries? (y/n): ").strip().lower()
     if bulk == "y":
@@ -422,11 +421,9 @@ def _render_mismatch_summary(
         failed_adds = sorted(added_ids - live_ids)
         if failed_adds:
             print(term.style(f"\n⚠ {len(failed_adds)} of the batch were not found on the list:", term._T.YELLOW))
-            for movie_id in failed_adds[:10]:
+            for movie_id in failed_adds:
                 movie = index.get("movies", {}).get(str(movie_id), {})
                 print(f"    - {title_line(movie)}")
-            if len(failed_adds) > 10:
-                print(f"    ... and {len(failed_adds) - 10} more")
         else:
             print(term.style(f"\n✓ All {len(added_ids)} batch movie(s) confirmed on the list.", term._T.GREEN))
 
@@ -565,10 +562,8 @@ def run_push_url_file_only(client: TMDBClient) -> None:
 
     if skipped:
         print(term.style(f"\n⚠ Skipped {len(skipped)} invalid line(s):", term._T.YELLOW))
-        for line_num, raw, reason in skipped[:5]:
+        for line_num, raw, reason in skipped:
             print(f"  Line {line_num}: {raw[:80]!r} — {reason}")
-        if len(skipped) > 5:
-            print(f"  ... and {len(skipped) - 5} more")
 
     if not records:
         print(term.style("\n✗ No valid movies found in file.", term._T.RED))
@@ -598,10 +593,8 @@ def run_push_url_file_only(client: TMDBClient) -> None:
                 term._T.YELLOW,
             )
         )
-        for record in already_present[:10]:
+        for record in already_present:
             print(f"    - {title_line(record)}")
-        if len(already_present) > 10:
-            print(f"    ... and {len(already_present) - 10} more")
         if incomplete:
             print(
                 term.style(
@@ -618,10 +611,8 @@ def run_push_url_file_only(client: TMDBClient) -> None:
 
     print()
     print(term.style(f"Found {len(to_push)} movie(s) to push:", term._T.BOLD, term._T.CYAN))
-    for record in to_push[:10]:
+    for record in to_push:
         print(f"  + {title_line(record)}")
-    if len(to_push) > 10:
-        print(f"  ... and {len(to_push) - 10} more")
 
     if not prompts.confirm(f"\nPush these {len(to_push)} movie(s) to remote list {remote_list_id}?", default=False):
         print("  → Cancelled")
@@ -683,11 +674,9 @@ def run_clean_vanished(client: TMDBClient) -> None:
 
     print()
     print(term.style(f"⚠ {len(missing_ids)} movie(s) in index but missing from the list:", term._T.YELLOW))
-    for movie_id in missing_ids[:10]:
+    for movie_id in missing_ids:
         movie = local_movies.get(str(movie_id), {})
         print(f"    - {title_line(movie)}")
-    if len(missing_ids) > 10:
-        print(f"    ... and {len(missing_ids) - 10} more")
 
     bulk = input("\nDelete all these entries? (y/n): ").strip().lower()
     if bulk == "y":
@@ -809,7 +798,7 @@ def run_franchise_gaps(_client: TMDBClient) -> None:
 
     # Offer to export missing franchise film URLs to a text file (append-only, deduplicated).
     if missing and prompts.confirm("Export missing franchise film URLs to a text file?", default=False):
-        default_target = str(DEFAULT_BATCH_FILE)
+        default_target = str(FRANCHISE_GAPS_EXPORT_FILE)
         target = input(f"Target file [default: {default_target}]: ").strip()
         if not target:
             target = default_target

@@ -45,7 +45,7 @@ class TestFranchiseGapsExport:
         """Exporting missing films appends URLs to the target file."""
         from main import run_franchise_gaps
 
-        target = tmp_path / "movie_urls.txt"
+        target = tmp_path / "franchise_gaps_urls.txt"
 
         monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
@@ -64,7 +64,7 @@ class TestFranchiseGapsExport:
         """Existing content in the target file is preserved."""
         from main import run_franchise_gaps
 
-        target = tmp_path / "movie_urls.txt"
+        target = tmp_path / "franchise_gaps_urls.txt"
         target.write_text("# Existing\nhttps://www.themoviedb.org/movie/999\n", encoding="utf-8")
 
         monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
@@ -84,7 +84,7 @@ class TestFranchiseGapsExport:
         """URLs already present in the target file are not added again."""
         from main import run_franchise_gaps
 
-        target = tmp_path / "movie_urls.txt"
+        target = tmp_path / "franchise_gaps_urls.txt"
         target.write_text(
             "https://www.themoviedb.org/movie/2\n",
             encoding="utf-8",
@@ -106,7 +106,7 @@ class TestFranchiseGapsExport:
         """If the user declines the export prompt, the file is not created."""
         from main import run_franchise_gaps
 
-        target = tmp_path / "movie_urls.txt"
+        target = tmp_path / "franchise_gaps_urls.txt"
 
         monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: False)

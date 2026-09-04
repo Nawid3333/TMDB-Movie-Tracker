@@ -309,11 +309,14 @@ class TestRenderDetailCard:
             render_detail_card({"id": 1, "title": "X"}, {"directors": ["A", "B"]})
         assert "Directors:" in out.getvalue()
 
-    def test_cast_is_capped_so_one_movie_cannot_fill_the_screen(self):
+    def test_cast_prints_every_member(self):
         cast = [{"name": f"Actor {n}", "character": f"Role {n}"} for n in range(50)]
         with captured() as out:
             render_detail_card({"id": 1, "title": "X"}, {"cast": cast})
-        assert "Actor 40" not in out.getvalue()
+        output = out.getvalue()
+        assert "Actor 0" in output
+        assert "Actor 49" in output
+        assert output.count("Actor ") == 50
 
     def test_a_cast_member_without_a_character_still_appears(self):
         with captured() as out:
