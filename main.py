@@ -143,6 +143,7 @@ def show_menu() -> None:
     print("  2. Fast scan       — list membership only (quick)")
     print("  3. Franchise gaps  — connected films and TV you missed")
     print("  4. Push URL file   — push URLs/IDs to remote list without adding locally")
+    print("  5. Force re-enrich — re-fetch every movie, ignoring freshness")
     print("  0. Exit")
 
 
@@ -152,6 +153,14 @@ def run_full_scan(client: TMDBClient) -> None:
     print()
     print(term.style("→ Full scan", term._T.BOLD, term._T.CYAN))
     enrich_run_full_scan(client, force=False, resume=True)
+
+
+def run_force_full_scan(client: TMDBClient) -> None:
+    """Re-fetch every movie in the index, ignoring freshness tiers."""
+    log.debug("Force re-enrich selected")
+    print()
+    print(term.style("→ Force re-enrich", term._T.BOLD, term._T.CYAN))
+    enrich_run_full_scan(client, force=True, resume=True)
 
 
 def run_fast_scan(client: TMDBClient) -> None:
@@ -882,6 +891,7 @@ def main() -> None:
         "2": run_fast_scan,
         "3": run_franchise_gaps,
         "4": run_push_url_file_only,
+        "5": run_force_full_scan,
     }
 
     with TMDBClient() as client:
@@ -899,7 +909,7 @@ def main() -> None:
         while True:
             show_menu()
             try:
-                choice = input("Enter your choice (0-4): ").strip()
+                choice = input("Enter your choice (0-5): ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 log.info("Goodbye!")
@@ -913,7 +923,7 @@ def main() -> None:
 
             action = actions.get(choice)
             if action is None:
-                print(term.style("✗ Invalid choice.", term._T.RED), "Please enter a number between 0 and 4.")
+                print(term.style("✗ Invalid choice.", term._T.RED), "Please enter a number between 0 and 5.")
                 continue
 
             try:
