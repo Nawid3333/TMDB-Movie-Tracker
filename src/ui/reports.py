@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from src.changes import ChangeSet
 from src.ui.term import _T, style
+from src.ui.term import cprint as print
 
 
 def _is_upcoming(date_str: str) -> bool:

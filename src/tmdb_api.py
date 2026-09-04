@@ -22,6 +22,8 @@ from config.config import (
     TMDB_READ_MAX_RETRIES,
     TMDB_READ_RETRY_DELAY,
 )
+from src.ui.term import cinput as input
+from src.ui.term import cprint as print
 
 logger = logging.getLogger(__name__)
 

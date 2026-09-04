@@ -11,6 +11,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from src.ui import term
+
 # ==================== DIRECTORIES ====================
 # Every path this program reads or writes -- .env, data/, logs/, posters/ --
 # hangs off BASE_DIR, so there is a single thing to point somewhere else.
@@ -136,13 +138,16 @@ def setup_logging() -> logging.Logger:
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # PlainFormatter strips any colour a call site added for the console, so
+    # the log file stays greppable.
     fh = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    fh.setFormatter(term.PlainFormatter("%(asctime)s [%(levelname)s] %(message)s"))
 
+    # Console: warnings yellow, errors red, criticals magenta.
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(message)s"))
+    ch.setFormatter(term.ColorFormatter("%(message)s"))
 
     logger.addHandler(fh)
     logger.addHandler(ch)

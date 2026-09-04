@@ -23,6 +23,7 @@ from src.index import ensure_record_exists, load_details, load_index, now_iso, s
 from src.posters import download_poster
 from src.tmdb_api import TMDBClient, pick_certification
 from src.ui.reports import title_line
+from src.ui.term import cprint as print
 
 logger = logging.getLogger(__name__)
 

@@ -2,6 +2,7 @@
 
 from src.ui.reports import title_line
 from src.ui.term import _T, style, wrap
+from src.ui.term import cprint as print
 
 
 def _comma_list(items: list[str]) -> str:

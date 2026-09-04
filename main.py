@@ -33,6 +33,8 @@ from src.search import (
 from src.tmdb_api import TMDBClient
 from src.ui import prompts, reports, term
 from src.ui.reports import title_line
+from src.ui.term import cinput as input
+from src.ui.term import cprint as print
 
 log = logging.getLogger(__name__)
 
@@ -268,7 +270,7 @@ def _prompt_clean_vanished(
         movie = local_movies.get(str(movie_id), {})
         print(f"    - {title_line(movie)}")
 
-    bulk = input("\nDelete all these vanished entries? (y/n): ").strip().lower()
+    bulk = input("\n" + term.danger("Delete all these vanished entries?") + term.dim(" (y/n): ")).strip().lower()
     if bulk == "y":
         removed = 0
         for movie_id in missing_ids:
@@ -289,7 +291,7 @@ def _prompt_clean_vanished(
     for movie_id in missing_ids:
         movie = local_movies.get(str(movie_id), {})
         print(f"\n{title_line(movie)}")
-        print("  1. Delete from local index")
+        print("  1. " + term.danger("Delete from local index"))
         print("  2. Rescrape / re-add to TMDB list")
         print("  3. Skip")
         choice = input("Choice (1/2/3): ").strip()
@@ -308,7 +310,7 @@ def _prompt_clean_vanished(
 
     if rescrape_ids:
         if not client.session_id:
-            print(term.style("\n✗ No TMDB session; cannot re-add movies to the list.", term._T.RED))
+            print("\n" + term.danger("✗ No TMDB session; cannot re-add movies to the list."))
             return
         print()
         print(f"  Re-adding {len(rescrape_ids)} movie(s) to TMDB list {remote_list_id}...")
@@ -528,10 +530,10 @@ def run_push_url_file_only(client: TMDBClient) -> None:
 
     remote_list_id = _config.TMDB_LIST_ID
     if not remote_list_id:
-        print(term.style("✗ No TMDB_LIST_ID configured.", term._T.RED))
+        print(term.danger("✗ No TMDB_LIST_ID configured."))
         return
     if not client.session_id:
-        print(term.style("✗ No TMDB session available.", term._T.RED))
+        print(term.danger("✗ No TMDB session available."))
         print("  Restart and approve the TMDB session prompt at startup.")
         return
 
@@ -652,7 +654,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
 
     remote_list_id = _config.TMDB_LIST_ID
     if not remote_list_id:
-        print(term.style("✗ No TMDB_LIST_ID configured.", term._T.RED))
+        print(term.danger("✗ No TMDB_LIST_ID configured."))
         return
 
     try:
@@ -678,7 +680,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
         movie = local_movies.get(str(movie_id), {})
         print(f"    - {title_line(movie)}")
 
-    bulk = input("\nDelete all these entries? (y/n): ").strip().lower()
+    bulk = input("\n" + term.danger("Delete all these entries?") + term.dim(" (y/n): ")).strip().lower()
     if bulk == "y":
         removed = 0
         for movie_id in missing_ids:
@@ -696,7 +698,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
     for movie_id in missing_ids:
         movie = local_movies.get(str(movie_id), {})
         print(f"\n{title_line(movie)}")
-        print("  1. Delete from local index")
+        print("  1. " + term.danger("Delete from local index"))
         print("  2. Rescrape / re-add to TMDB list")
         print("  3. Skip")
         choice = input("Choice (1/2/3): ").strip()
@@ -715,7 +717,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
 
     if rescrape_ids:
         if not client.session_id:
-            print(term.style("\n✗ No TMDB session; cannot re-add movies to the list.", term._T.RED))
+            print("\n" + term.danger("✗ No TMDB session; cannot re-add movies to the list."))
             return
         print()
         print(f"  Re-adding {len(rescrape_ids)} movie(s) to TMDB list {remote_list_id}...")

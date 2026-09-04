@@ -1,6 +1,8 @@
 """All user prompts and confirmations live here — no input() elsewhere."""
 
 from src.ui.term import _T, style
+from src.ui.term import cinput as input
+from src.ui.term import cprint as print
 
 _PREVIEW_LIMIT = 20
 _DEFAULT_PAGE_SIZE = 20
