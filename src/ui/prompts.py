@@ -1,6 +1,6 @@
 """All user prompts and confirmations live here — no input() elsewhere."""
 
-from src.ui.term import _T, style
+from src.ui.term import bold, step
 from src.ui.term import cinput as input
 from src.ui.term import cprint as print
 
@@ -31,7 +31,7 @@ def ask_choice(prompt: str, options: list[str], default: str = "") -> str:
 
     Returns the selected option string.
     """
-    opt_text = "/".join(style(opt.upper(), _T.BOLD, _T.CYAN) if opt == default else opt for opt in options)
+    opt_text = "/".join(step(opt.upper()) if opt == default else opt for opt in options)
     while True:
         answer = input(f"{prompt} [{opt_text}]: ").strip().lower()
         if not answer and default:
@@ -57,6 +57,6 @@ def confirm(prompt: str, default: bool = False) -> bool:
 
 def confirm_category(category: str, items: list[str], default: bool = False) -> bool:
     """Confirm a category of changes with paginated preview."""
-    print(style(f"\n[{category}]", _T.BOLD))
+    print(bold(f"\n[{category}]"))
     paginate_list(items, page_size=_DEFAULT_PAGE_SIZE)
     return confirm("Approve these changes?", default=default)

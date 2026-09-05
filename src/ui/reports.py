@@ -3,8 +3,8 @@
 from datetime import UTC, datetime
 
 from src.changes import ChangeSet
-from src.ui.term import _T, style
 from src.ui.term import cprint as print
+from src.ui.term import danger, dim, step, success, warn
 
 
 def _is_upcoming(date_str: str) -> bool:
@@ -31,27 +31,27 @@ def title_line(record: dict, *, show_upcoming: bool = False) -> str:
 def render_change_report(change_set: ChangeSet) -> None:
     """Print a human-readable summary of proposed changes."""
     print()
-    print(style("Fast scan results", _T.BOLD, _T.CYAN))
+    print(step("Fast scan results"))
     print(f"  Current index: {change_set.current_count} movies")
     print(f"  TMDB list:      {change_set.proposed_count} movies")
 
     if change_set.incomplete:
         print()
-        print(style("  ⚠ Scan was incomplete or failed the shrink gate.", _T.YELLOW))
+        print(warn("  ⚠ Scan was incomplete or failed the shrink gate."))
         print("    Removal proposals are blocked until a complete scan succeeds.")
 
     if change_set.additions:
         print()
-        print(style(f"Additions: {len(change_set.additions)}", _T.BOLD, _T.GREEN))
+        print(success(f"Additions: {len(change_set.additions)}"))
         for record in change_set.additions.values():
             print(f"  + {title_line(record)}")
 
     if change_set.removals:
         print()
-        print(style(f"Removals: {len(change_set.removals)}", _T.BOLD, _T.RED))
+        print(danger(f"Removals: {len(change_set.removals)}"))
         for record in change_set.removals.values():
             print(f"  - {title_line(record)}")
 
     if not change_set.additions and not change_set.removals:
         print()
-        print(style("  No changes to review.", _T.DIM))
+        print(dim("  No changes to review."))

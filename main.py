@@ -44,7 +44,7 @@ def print_header() -> None:
     print()
     for line in term.box(
         [
-            term.style("TMDB Movie Tracker", term._T.BOLD, term._T.CYAN),
+            term.step("TMDB Movie Tracker"),
             "Track your watched films from a TMDB custom list",
         ],
         width=64,
@@ -137,7 +137,7 @@ def _format_host_rows(hosts):
 def show_menu() -> None:
     """Print the main menu."""
     print()
-    print(term.style("Menu", term._T.BOLD, term._T.CYAN))
+    print(term.step("Menu"))
     print("  " + "─" * 52)
     print("  1. Full scan       — every detail (slow, accurate)")
     print("  2. Fast scan       — list membership only (quick)")
@@ -151,7 +151,7 @@ def run_full_scan(client: TMDBClient) -> None:
     """Run a full enrichment scan over the local index."""
     log.debug("Full scan selected")
     print()
-    print(term.style("→ Full scan", term._T.BOLD, term._T.CYAN))
+    print(term.step("→ Full scan"))
     enrich_run_full_scan(client, force=False, resume=True)
 
 
@@ -159,7 +159,19 @@ def run_force_full_scan(client: TMDBClient) -> None:
     """Re-fetch every movie in the index, ignoring freshness tiers."""
     log.debug("Force re-enrich selected")
     print()
-    print(term.style("→ Force re-enrich", term._T.BOLD, term._T.CYAN))
+    print(term.step("→ Force re-enrich"))
+
+    # The freshness tiers exist so an ordinary full scan re-fetches only what
+    # has gone stale. This ignores them and asks TMDB for every movie in the
+    # index, which on a large index is a long run and a real slice of the
+    # rate limit -- and it sits one keystroke away from the fast scan on the
+    # menu. Cheap to confirm, expensive to trigger by accident.
+    count = len(load_index().get("movies", {}))
+    print(term.warn(f"  This re-fetches all {count} movie(s), ignoring freshness tiers."))
+    if not prompts.confirm("Re-fetch everything now?", default=False):
+        print(term.dim("  Cancelled."))
+        return
+
     enrich_run_full_scan(client, force=True, resume=True)
 
 
@@ -167,14 +179,14 @@ def run_fast_scan(client: TMDBClient) -> None:
     """Fetch list membership, diff against index, confirm, and save."""
     log.debug("Starting fast scan...")
     print()
-    print(term.style("→ Fast scan", term._T.BOLD, term._T.CYAN))
+    print(term.step("→ Fast scan"))
     index = load_index()
 
     try:
         items, incomplete = fetch_list(client, _config.TMDB_LIST_ID)
     except ListFetchError as exc:
         log.error("Fast scan failed: %s", exc)
-        print(term.style("✗ Could not fetch the list:", term._T.RED), str(exc))
+        print(term.err("✗ Could not fetch the list:"), str(exc))
         return
 
     change_set = detect_changes(
@@ -189,7 +201,7 @@ def run_fast_scan(client: TMDBClient) -> None:
         index["last_fast_scan"] = now_iso()
         save_index(index)
         log.debug("Fast scan complete; no changes")
-        print(term.style("✓ Index is up to date.", term._T.GREEN))
+        print(term.ok("✓ Index is up to date."))
         return
 
     approve_additions = False
@@ -204,7 +216,7 @@ def run_fast_scan(client: TMDBClient) -> None:
 
     if not approve_additions and not approve_removals:
         print()
-        print(term.style("  ⚠ No changes approved.", term._T.YELLOW), "Index was not modified.")
+        print(term.warn("  ⚠ No changes approved."), "Index was not modified.")
         log.debug("Fast scan: user approved no changes")
         return
 
@@ -217,7 +229,7 @@ def run_fast_scan(client: TMDBClient) -> None:
 
     if not prompts.confirm("Save these changes?", default=False):
         print()
-        print(term.style("  ⚠ Changes discarded.", term._T.YELLOW))
+        print(term.warn("  ⚠ Changes discarded."))
         log.debug("Fast scan: user cancelled save")
         return
 
@@ -241,9 +253,9 @@ def run_fast_scan(client: TMDBClient) -> None:
         removed,
         change_set.incomplete,
     )
-    print(term.style("✓ Index saved.", term._T.GREEN))
+    print(term.ok("✓ Index saved."))
     if change_set.incomplete:
-        print(term.style("  ⚠ The list fetch was incomplete.", term._T.YELLOW))
+        print(term.warn("  ⚠ The list fetch was incomplete."))
         print("    Removal proposals are blocked until a complete scan succeeds.")
 
     # Always show the mismatch counter after a fast scan.
@@ -274,7 +286,7 @@ def _prompt_clean_vanished(
         return
 
     print()
-    print(term.style(f"⚠ {len(missing_ids)} movie(s) in index but missing from the list:", term._T.YELLOW))
+    print(term.warn(f"⚠ {len(missing_ids)} movie(s) in index but missing from the list:"))
     for movie_id in missing_ids:
         movie = local_movies.get(str(movie_id), {})
         print(f"    - {title_line(movie)}")
@@ -289,7 +301,7 @@ def _prompt_clean_vanished(
                 removed += 1
         index["movies"] = local_movies
         save_index(index)
-        print(term.style(f"\n✓ Removed {removed} vanished movie(s) from the index.", term._T.GREEN))
+        print(term.ok(f"\n✓ Removed {removed} vanished movie(s) from the index."))
         return
     if bulk == "n":
         print("  → Skipped vanish cleanup")
@@ -315,7 +327,7 @@ def _prompt_clean_vanished(
     if removed:
         index["movies"] = local_movies
         save_index(index)
-        print(term.style(f"\n✓ Removed {removed} movie(s) from the index.", term._T.GREEN))
+        print(term.ok(f"\n✓ Removed {removed} movie(s) from the index."))
 
     if rescrape_ids:
         if not client.session_id:
@@ -421,7 +433,7 @@ def _render_mismatch_summary(
     matched = sorted(local_ids & live_ids)
 
     print()
-    print(term.style("Mismatch report", term._T.BOLD, term._T.CYAN))
+    print(term.step("Mismatch report"))
     print(f"  • Index total:  {len(local_ids)}")
     print(f"  • List total:   {len(live_ids)}")
     print(f"  • Matched:      {len(matched)}")
@@ -431,15 +443,15 @@ def _render_mismatch_summary(
     if added_ids:
         failed_adds = sorted(added_ids - live_ids)
         if failed_adds:
-            print(term.style(f"\n⚠ {len(failed_adds)} of the batch were not found on the list:", term._T.YELLOW))
+            print(term.warn(f"\n⚠ {len(failed_adds)} of the batch were not found on the list:"))
             for movie_id in failed_adds:
                 movie = index.get("movies", {}).get(str(movie_id), {})
                 print(f"    - {title_line(movie)}")
         else:
-            print(term.style(f"\n✓ All {len(added_ids)} batch movie(s) confirmed on the list.", term._T.GREEN))
+            print(term.ok(f"\n✓ All {len(added_ids)} batch movie(s) confirmed on the list."))
 
     if missing_from_list and not added_ids:
-        print(term.style("\n⚠ Some local movies are not on the remote list.", term._T.YELLOW))
+        print(term.warn("\n⚠ Some local movies are not on the remote list."))
 
 
 def _compare_text(count: int, idx_count: int) -> str:
@@ -493,13 +505,13 @@ def _fetch_and_summarize_mismatches(client: TMDBClient, *, added_ids: set[int] |
         items, incomplete = fetch_list(client, _config.TMDB_LIST_ID)
     except ListFetchError as exc:
         log.error("Could not fetch list for mismatch summary: %s", exc)
-        print(term.style("✗ Could not verify against the live list:", term._T.RED), str(exc))
+        print(term.err("✗ Could not verify against the live list:"), str(exc))
         return
 
     index = load_index()
     _render_mismatch_summary(index, items, added_ids)
     if incomplete:
-        print(term.style("  ⚠ List fetch was incomplete; mismatch counts may be low.", term._T.YELLOW))
+        print(term.warn("  ⚠ List fetch was incomplete; mismatch counts may be low."))
 
 
 def _gaps_report_fresh(generated_at: str, max_age_minutes: int = 5) -> bool:
@@ -535,7 +547,7 @@ def run_push_url_file_only(client: TMDBClient) -> None:
     """
     log.debug("Push URL file only selected")
     print()
-    print(term.style("→ Push URL file", term._T.BOLD, term._T.CYAN))
+    print(term.step("→ Push URL file"))
 
     remote_list_id = _config.TMDB_LIST_ID
     if not remote_list_id:
@@ -556,28 +568,28 @@ def run_push_url_file_only(client: TMDBClient) -> None:
 
     if os.path.exists(source):
         if os.path.isdir(source):
-            print(term.style(f"✗ Path is a directory: {source}", term._T.RED))
+            print(term.err(f"✗ Path is a directory: {source}"))
             return
         try:
             records, skipped = resolve_movie_ids_from_file(client, source)
         except SearchError as exc:
             log.error("Failed to read URL file: %s", exc)
-            print(term.style(f"✗ Failed to read file: {exc}", term._T.RED))
+            print(term.err(f"✗ Failed to read file: {exc}"))
             return
     else:
         single = resolve_movie_id_from_input(client, source)
         if single is None:
-            print(term.style(f"✗ Not a valid TMDB/IMDb URL or id: {source}", term._T.RED))
+            print(term.err(f"✗ Not a valid TMDB/IMDb URL or id: {source}"))
             return
         records = [single]
 
     if skipped:
-        print(term.style(f"\n⚠ Skipped {len(skipped)} invalid line(s):", term._T.YELLOW))
+        print(term.warn(f"\n⚠ Skipped {len(skipped)} invalid line(s):"))
         for line_num, raw, reason in skipped:
             print(f"  Line {line_num}: {raw[:80]!r} — {reason}")
 
     if not records:
-        print(term.style("\n✗ No valid movies found in file.", term._T.RED))
+        print(term.err("\n✗ No valid movies found in file."))
         return
 
     print("\n  Checking the live TMDB list for existing entries...")
@@ -585,7 +597,7 @@ def run_push_url_file_only(client: TMDBClient) -> None:
         live_items, incomplete = fetch_list(client, remote_list_id)
     except ListFetchError as exc:
         log.error("Could not fetch live list before push: %s", exc)
-        print(term.style("✗ Could not fetch the live list:", term._T.RED), str(exc))
+        print(term.err("✗ Could not fetch the live list:"), str(exc))
         return
 
     live_ids = {int(item.get("id", 0)) for item in live_items if item.get("id")}
@@ -598,30 +610,20 @@ def run_push_url_file_only(client: TMDBClient) -> None:
             to_push.append(record)
 
     if already_present:
-        print(
-            term.style(
-                f"⚠ {len(already_present)} movie(s) already on the list and will be skipped:",
-                term._T.YELLOW,
-            )
-        )
+        print(term.warn(f"⚠ {len(already_present)} movie(s) already on the list and will be skipped:"))
         for record in already_present:
             print(f"    - {title_line(record)}")
         if incomplete:
-            print(
-                term.style(
-                    "  (List fetch was incomplete; some already-present matches may have been missed.)",
-                    term._T.YELLOW,
-                )
-            )
+            print(term.warn("  (List fetch was incomplete; some already-present matches may have been missed.)"))
 
     if not to_push:
         print()
-        print(term.style("✓ Nothing new to push.", term._T.GREEN))
+        print(term.ok("✓ Nothing new to push."))
         print("  → Run option 1 (Fast scan) to pull the list into your local index.")
         return
 
     print()
-    print(term.style(f"Found {len(to_push)} movie(s) to push:", term._T.BOLD, term._T.CYAN))
+    print(term.step(f"Found {len(to_push)} movie(s) to push:"))
     for record in to_push:
         print(f"  + {title_line(record)}")
 
@@ -645,10 +647,7 @@ def run_push_url_file_only(client: TMDBClient) -> None:
     print()
     total_processed = len(to_push)
     print(
-        term.style(
-            f"Pushed {total_processed} movie(s): {push_ok} ok, {duplicates} already present, {push_fail} failed.",
-            term._T.GREEN,
-        )
+        term.ok(f"Pushed {total_processed} movie(s): {push_ok} ok, {duplicates} already present, {push_fail} failed.")
     )
     if already_present:
         print(f"  {len(already_present)} already on the list were skipped before pushing.")
@@ -659,7 +658,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
     """Find local index movies missing from the remote list and ask to delete or rescrape."""
     log.debug("Clean vanished selected")
     print()
-    print(term.style("→ Clean vanished entries", term._T.BOLD, term._T.CYAN))
+    print(term.step("→ Clean vanished entries"))
 
     remote_list_id = _config.TMDB_LIST_ID
     if not remote_list_id:
@@ -670,7 +669,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
         items, incomplete = fetch_list(client, remote_list_id)
     except ListFetchError as exc:
         log.error("Could not fetch list for vanished cleanup: %s", exc)
-        print(term.style("✗ Could not fetch the live list:", term._T.RED), str(exc))
+        print(term.err("✗ Could not fetch the live list:"), str(exc))
         return
 
     index = load_index()
@@ -680,11 +679,11 @@ def run_clean_vanished(client: TMDBClient) -> None:
     missing_ids = sorted(local_ids - live_ids)
 
     if not missing_ids:
-        print(term.style("\n✓ No vanished entries. Every local movie is still on the list.", term._T.GREEN))
+        print(term.ok("\n✓ No vanished entries. Every local movie is still on the list."))
         return
 
     print()
-    print(term.style(f"⚠ {len(missing_ids)} movie(s) in index but missing from the list:", term._T.YELLOW))
+    print(term.warn(f"⚠ {len(missing_ids)} movie(s) in index but missing from the list:"))
     for movie_id in missing_ids:
         movie = local_movies.get(str(movie_id), {})
         print(f"    - {title_line(movie)}")
@@ -699,7 +698,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
                 removed += 1
         index["movies"] = local_movies
         save_index(index)
-        print(term.style(f"\n✓ Removed {removed} vanished movie(s) from the index.", term._T.GREEN))
+        print(term.ok(f"\n✓ Removed {removed} vanished movie(s) from the index."))
         return
 
     rescrape_ids: list[int] = []
@@ -722,7 +721,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
     if removed:
         index["movies"] = local_movies
         save_index(index)
-        print(term.style(f"\n✓ Removed {removed} movie(s) from the index.", term._T.GREEN))
+        print(term.ok(f"\n✓ Removed {removed} movie(s) from the index."))
 
     if rescrape_ids:
         if not client.session_id:
@@ -752,7 +751,7 @@ def run_franchise_gaps(_client: _TMDBClientLike) -> None:
     """Report connected films and TV not in the index."""
     log.debug("Franchise gaps selected")
     print()
-    print(term.style("→ Franchise gaps", term._T.BOLD, term._T.CYAN))
+    print(term.step("→ Franchise gaps"))
 
     cached = load_gaps()
     if cached and _gaps_report_fresh(cached.get("generated_at", "")):
@@ -763,7 +762,7 @@ def run_franchise_gaps(_client: _TMDBClientLike) -> None:
         gaps = find_gaps()
 
     print()
-    print(term.style(f"Franchise gaps ({gaps['indexed_count']} films in index)", term._T.BOLD, term._T.CYAN))
+    print(term.step(f"Franchise gaps ({gaps['indexed_count']} films in index)"))
 
     def _gap_url(item: dict) -> str:
         item_id = item.get("id")
@@ -788,20 +787,20 @@ def run_franchise_gaps(_client: _TMDBClientLike) -> None:
     missing = gaps.get("missing_films", [])
     if missing:
         print()
-        print(term.style(f"Missing franchise films: {len(missing)}", term._T.BOLD))
+        print(term.bold(f"Missing franchise films: {len(missing)}"))
         _print_gap_table(missing)
     else:
         print()
-        print(term.style("  ✓ No missing franchise films.", term._T.GREEN))
+        print(term.ok("  ✓ No missing franchise films."))
 
     tv = gaps.get("connected_tv", [])
     if tv:
         print()
-        print(term.style(f"Connected TV series: {len(tv)}", term._T.BOLD))
+        print(term.bold(f"Connected TV series: {len(tv)}"))
         _print_gap_table(tv)
     else:
         print()
-        print(term.style("  ✓ No connected TV series.", term._T.GREEN))
+        print(term.ok("  ✓ No connected TV series."))
 
     # Persist / surface the gaps JSON path
     print()
@@ -852,20 +851,20 @@ def run_franchise_gaps(_client: _TMDBClientLike) -> None:
                         fh.write("\n")
                     fh.write(header + "\n")
                     fh.write("\n".join(new_urls) + "\n")
-                print(term.style(f"  ✓ Appended {len(new_urls)} URL(s) to {target_path}", term._T.GREEN))
+                print(term.ok(f"  ✓ Appended {len(new_urls)} URL(s) to {target_path}"))
             except OSError as exc:
                 log.error("Could not append to %s: %s", target_path, exc)
-                print(term.style(f"  ✗ Could not write to {target_path}: {exc}", term._T.RED))
+                print(term.err(f"  ✗ Could not write to {target_path}: {exc}"))
 
 
 def check_api_key() -> bool:
     """Fail fast if no API key is configured."""
     if not _config.TMDB_API_KEY:
         log.error("TMDB_API_KEY is not set. Add it to your .env file.")
-        print(term.style("✗ TMDB_API_KEY is not set.", term._T.RED))
+        print(term.err("✗ TMDB_API_KEY is not set."))
         print("  Add it to .env in the project root and try again.")
         return False
-    print(term.style("✓ API key configured", term._T.GREEN))
+    print(term.ok("✓ API key configured"))
     return True
 
 
@@ -899,7 +898,7 @@ def main() -> None:
         # in the browser, TMDB does not expire it, so this is a one-time step.
         client.ensure_session()
         if client.session_id:
-            print(term.style("  ✓ TMDB session available", term._T.GREEN))
+            print(term.ok("  ✓ TMDB session available"))
         else:
             print("  → No TMDB session; writes that require auth are disabled")
 
@@ -917,13 +916,13 @@ def main() -> None:
 
             if choice == "0":
                 print()
-                print(term.style("✓ Goodbye!", term._T.GREEN))
+                print(term.ok("✓ Goodbye!"))
                 log.debug("Goodbye!")
                 break
 
             action = actions.get(choice)
             if action is None:
-                print(term.style("✗ Invalid choice.", term._T.RED), "Please enter a number between 0 and 5.")
+                print(term.err("✗ Invalid choice."), "Please enter a number between 0 and 5.")
                 continue
 
             try:
@@ -931,15 +930,15 @@ def main() -> None:
             except KeyboardInterrupt:
                 print()
                 log.warning("Option %s interrupted by the user", choice)
-                print(term.style("  ⚠ Stopped.", term._T.YELLOW), "Any partly written data has been discarded.")
+                print(term.warn("  ⚠ Stopped."), "Any partly written data has been discarded.")
             except Exception as exc:
                 log.error("Option %s failed: %s", choice, exc, exc_info=True)
                 print()
-                print(f"{term.style('✗ That option did not finish:', term._T.RED)} {exc}")
+                print(f"{term.err('✗ That option did not finish:')} {exc}")
                 print(f"  Full detail is in {LOG_FILE}")
 
     print()
-    print(term.style("✓ Done!", term._T.GREEN))
+    print(term.ok("✓ Done!"))
     log.debug("Done!")
 
 
@@ -970,7 +969,7 @@ def _run_cli() -> int:
         return exc.code if isinstance(exc.code, int) else 1
     except Exception as exc:
         log.critical("Unexpected error: %s", exc, exc_info=True)
-        print(f"\n{term.style('✗ Unexpected error:', term._T.RED)} {exc}")
+        print(f"\n{term.err('✗ Unexpected error:')} {exc}")
         print(f"  This is a bug. Full detail is in {LOG_FILE}")
         return 1
     return 0

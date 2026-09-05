@@ -135,3 +135,86 @@ class TestTruncatedFetchIsReportedIncomplete:
         items, incomplete = fetch_list(Underfilling(), 123, cache_path=tmp_path / "c.json")
         assert incomplete is True
         assert len(items) == 50
+
+
+class TestPaginationTrustsTheItemCount:
+    """The counters on a list page are hints from the server, not facts.
+
+    `total_pages` for this endpoint has been observed to under-report, and
+    `incomplete` gates every removal downstream -- so a list that stops early
+    on the server's word does not merely lose items once, it stays stuck.
+    """
+
+    @staticmethod
+    def _resp(payload: dict) -> httpx.Response:
+        return httpx.Response(200, json=payload, request=httpx.Request("GET", "https://example.com/"))
+
+    def test_an_under_reported_total_pages_does_not_truncate_the_fetch(self, tmp_path: Path) -> None:
+        """item_count says 100 items; total_pages wrongly says 1."""
+
+        class UnderReporting:
+            session_id: str | None = None
+
+            def get(self, path, params=None, auth=False):
+                page = (params or {}).get("page") or 1
+                start = (page - 1) * 20 + 1
+                items = [
+                    {"media_type": "movie", "id": i, "title": f"M{i}", "release_date": "2020-01-01"}
+                    for i in range(start, min(start + 20, 101))
+                ]
+                return TestPaginationTrustsTheItemCount._resp({"items": items, "item_count": 100, "total_pages": 1})
+
+            def ensure_session(self):
+                return None
+
+        items, incomplete = fetch_list(UnderReporting(), 123, cache_path=tmp_path / "c.json")
+        assert len(items) == 100
+        assert incomplete is False
+
+    def test_non_integer_counters_do_not_crash_the_scan(self, tmp_path: Path) -> None:
+        """A string total_pages once reached `page <= total_pages` directly."""
+
+        class Stringly:
+            session_id: str | None = None
+
+            def get(self, path, params=None, auth=False):
+                page = (params or {}).get("page") or 1
+                items = (
+                    [{"media_type": "movie", "id": 1, "title": "M1", "release_date": "2020-01-01"}] if page == 1 else []
+                )
+                return TestPaginationTrustsTheItemCount._resp({"items": items, "item_count": "1", "total_pages": "1"})
+
+            def ensure_session(self):
+                return None
+
+        items, incomplete = fetch_list(Stringly(), 123, cache_path=tmp_path / "c.json")
+        assert len(items) == 1
+        assert incomplete is False
+
+    def test_a_runaway_total_pages_is_capped(self, tmp_path: Path) -> None:
+        """A server claiming a million pages must not loop forever."""
+
+        class Runaway:
+            session_id: str | None = None
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get(self, path, params=None, auth=False):
+                self.calls += 1
+                page = (params or {}).get("page") or 1
+                items = [
+                    {"media_type": "movie", "id": (page - 1) * 20 + i, "title": "M", "release_date": "2020-01-01"}
+                    for i in range(20)
+                ]
+                return TestPaginationTrustsTheItemCount._resp(
+                    {"items": items, "item_count": 20_000_000, "total_pages": 1_000_000}
+                )
+
+            def ensure_session(self):
+                return None
+
+        client = Runaway()
+        _items, incomplete = fetch_list(client, 123, cache_path=tmp_path / "c.json")
+        assert client.calls == 500
+        assert incomplete is True

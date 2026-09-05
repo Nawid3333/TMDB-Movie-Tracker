@@ -67,7 +67,7 @@ class TestDisplayWidth:
         assert term.display_width("hello") == 5
 
     def test_ansi_codes_take_no_columns(self):
-        assert term.display_width(term.style("hello", term._T.BOLD)) == 5
+        assert term.display_width(term.style("hello", term.Style.BOLD)) == 5
 
     def test_a_wide_cjk_character_takes_two_columns(self):
         assert term.display_width("漢") == 2
@@ -85,7 +85,7 @@ class TestDisplayWidth:
 
 class TestStripAnsi:
     def test_removes_codes_and_keeps_text(self):
-        assert term.strip_ansi(term.style("x", term._T.BOLD, term._T.CYAN)) == "x"
+        assert term.strip_ansi(term.style("x", term.Style.BOLD, term.Style.CYAN)) == "x"
 
     def test_leaves_plain_text_alone(self):
         assert term.strip_ansi("plain") == "plain"
@@ -95,11 +95,11 @@ class TestStyle:
     def test_no_color_disables_styling(self, monkeypatch):
         """NO_COLOR is a standard; honouring it must survive refactors."""
         monkeypatch.setattr(term, "_COLOR", False)
-        assert term.style("x", term._T.BOLD) == "x"
+        assert term.style("x", term.Style.BOLD) == "x"
 
     def test_styling_wraps_and_resets(self, monkeypatch):
         monkeypatch.setattr(term, "_COLOR", True)
-        assert term.style("x", term._T.BOLD).endswith(term._T.RESET)
+        assert term.style("x", term.Style.BOLD).endswith(term.Style.RESET)
 
 
 # ── wrapping and boxes ──────────────────────────────────────────────────────
@@ -141,7 +141,7 @@ class TestBox:
         assert len(term.box([])) == 2, "top and bottom edges only"
 
     def test_ansi_styling_does_not_skew_the_edges(self):
-        lines = term.box([term.style("coloured", term._T.CYAN), "plain"])
+        lines = term.box([term.style("coloured", term.Style.CYAN), "plain"])
         widths = {term.display_width(line) for line in lines}
         assert len(widths) == 1
 

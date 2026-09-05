@@ -1,8 +1,8 @@
 """Movie detail card rendering for the terminal."""
 
 from src.ui.reports import title_line
-from src.ui.term import _T, style, wrap
 from src.ui.term import cprint as print
+from src.ui.term import dim, step, wrap
 
 
 def _comma_list(items: list[str]) -> str:
@@ -15,11 +15,11 @@ def _pluralize(count: int, singular: str, plural: str | None = None) -> str:
 
 def render_detail_card(membership: dict, detail: dict) -> None:
     """Print a text detail card for a movie."""
-    lines = [style(title_line(membership), _T.BOLD, _T.CYAN)]
+    lines = [step(title_line(membership))]
 
     tagline = detail.get("tagline")
     if tagline:
-        lines.append(style(tagline, _T.DIM))
+        lines.append(dim(tagline))
 
     status = membership.get("status") or detail.get("status")
     runtime = detail.get("runtime")

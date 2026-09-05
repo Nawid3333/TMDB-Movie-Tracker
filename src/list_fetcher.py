@@ -12,6 +12,12 @@ from src.tmdb_api import _TMDBClientLike
 
 logger = logging.getLogger(__name__)
 
+# TMDB serves list pages 20 items at a time, and a list that claims more pages
+# than this is a broken response rather than a real list -- without the cap a
+# bad total_pages is an unbounded fetch loop.
+_PER_PAGE = 20
+_MAX_PAGES = 500
+
 
 class ListFetchError(Exception):
     """Raised when the list cannot be fetched or assembled."""
@@ -84,10 +90,42 @@ def fetch_list(
                 break
 
             items.extend(page_items)
-            if expected_items is None:
-                expected_items = data.get("item_count")
-                total_pages = data.get("total_pages") or total_pages
+
+            # Both counters come off the wire and neither is trusted to be an
+            # int: a string total_pages would blow up the `page <= total_pages`
+            # comparison above, and a string item_count the short-read check
+            # below -- neither is caught by the handler around the fetch, so
+            # either one takes the whole scan down with it.
+            item_count = data.get("item_count")
+            if isinstance(item_count, int) and item_count > 0:
+                expected_items = item_count
+                # total_pages for this endpoint has been seen to under-report.
+                # item_count is the number the list itself stands behind, so
+                # derive a page count from it and keep whichever is larger:
+                # stopping on the server's word instead leaves a complete list
+                # looking like a short read, and `incomplete` gates every
+                # removal downstream, so it would never resolve on its own.
+                total_pages = max(total_pages, (item_count + _PER_PAGE - 1) // _PER_PAGE)
+
+            reported_total = data.get("total_pages")
+            if isinstance(reported_total, int) and reported_total > 0:
+                if page == 1 and reported_total != total_pages:
+                    logger.debug(
+                        "total_pages (%d) differs from the item_count-derived %d; using the larger",
+                        reported_total,
+                        total_pages,
+                    )
+                total_pages = max(total_pages, reported_total)
+
             page += 1
+            if page > _MAX_PAGES:
+                logger.warning(
+                    "List pagination capped at %d pages / %d items",
+                    _MAX_PAGES,
+                    _MAX_PAGES * _PER_PAGE,
+                )
+                incomplete = True
+                break
 
         # If the list reports a total item count, double-check that we really
         # got that many. A broken stream might never deliver a blank page but
@@ -108,6 +146,8 @@ def fetch_list(
         session_id = client.ensure_session()
         if session_id:
             items, incomplete = _try_fetch(auth=True)
+        else:
+            logger.warning("No session available; private list reads will fail")
 
     if cache_path is None:
         cache_path = _list_cache_path(list_id, DATA_DIR)
