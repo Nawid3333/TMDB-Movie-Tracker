@@ -24,7 +24,7 @@ def _load_fixture(rel_path: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def fixtures() -> dict[str, dict]:
     """Load all captured real TMDB fixtures by friendly key.
 
@@ -33,6 +33,10 @@ def fixtures() -> dict[str, dict]:
     suite has to stay runnable for anyone who has not captured them, which is
     every CI run and every new contributor. Regenerate with
     ``python tests/capture_fixtures.py``.
+
+    Session-scoped: the payloads are read-only and never mutated by tests, so
+    parsing the ten JSON files once per run instead of once per test removes
+    the single largest source of repeated disk I/O in the suite.
     """
     try:
         return _all_fixtures()
