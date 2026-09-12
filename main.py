@@ -27,6 +27,7 @@ from src.list_fetcher import ListFetchError, fetch_list
 from src.search import (
     SearchError,
     push_to_tmdb_list,
+    remove_from_tmdb_list,
     resolve_movie_id_from_input,
     resolve_movie_ids_from_file,
 )
@@ -189,6 +190,8 @@ def run_fast_scan(client: TMDBClient) -> None:
         print(term.err("✗ Could not fetch the list:"), str(exc))
         return
 
+    _notify_non_movie_list_items(client, items)
+
     change_set = detect_changes(
         index.get("movies", {}),
         items,
@@ -265,6 +268,119 @@ def run_fast_scan(client: TMDBClient) -> None:
     _prompt_clean_vanished(client, items, index)
 
 
+def _movie_only_ids(items: list[dict]) -> set[int]:
+    """IDs of the movie entries in a raw TMDB list fetch.
+
+    A TMDB list can hold TV shows alongside movies, each tagged with its own
+    "media_type", but the index this tracker keeps is movie-only (see
+    src.changes._extract_list_movie). Counting every item regardless of type
+    mixes two separate ID namespaces: a TV show's numeric id means nothing
+    under /movie/{id}, so it shows up as a phantom "extra on list" movie with
+    a wrong title and a URL that points at an unrelated (or nonexistent) film.
+    """
+    return {int(item["id"]) for item in items if item.get("media_type") == "movie" and item.get("id")}
+
+
+def _non_movie_items(items: list[dict]) -> list[dict]:
+    """Non-movie entries in a raw TMDB list fetch, normalized for display.
+
+    Each result carries a link to the item's own TMDB page (under its real
+    media type, e.g. /tv/{id}) rather than a /movie/{id} guess, so it can be
+    opened and verified before anything is removed.
+    """
+    seen: set[int] = set()
+    out: list[dict] = []
+    for item in items:
+        media_type = item.get("media_type")
+        movie_id = item.get("id")
+        if media_type == "movie" or not movie_id:
+            continue
+        movie_id = int(movie_id)
+        if movie_id in seen:
+            continue
+        seen.add(movie_id)
+        out.append(
+            {
+                "id": movie_id,
+                "media_type": media_type or "unknown",
+                "title": item.get("title") or item.get("name") or "(untitled)",
+                "url": f"https://www.themoviedb.org/{media_type or 'movie'}/{movie_id}",
+            }
+        )
+    return out
+
+
+def _notify_non_movie_list_items(client: TMDBClient, items: list[dict]) -> None:
+    """Warn about non-movie entries on the TMDB list and offer to remove them.
+
+    This tracker is movie-only, so a TV show sitting on the list is silently
+    excluded from every count and comparison -- without this it would just
+    vanish from view instead of being surfaced for the user to check and act
+    on. Each entry's own link is printed so it can be opened in a browser and
+    verified before anything is removed.
+    """
+    non_movies = _non_movie_items(items)
+    if not non_movies:
+        return
+
+    print()
+    print(term.warn(f"⚠ {len(non_movies)} non-movie item(s) found on the TMDB list (not counted above):"))
+    for entry in non_movies:
+        print(f"    - [{entry['media_type']}] {entry['title']}")
+        print(f"        {entry['url']}")
+
+    remote_list_id = _config.TMDB_LIST_ID
+    if not remote_list_id or not client.session_id:
+        print(term.dim("  Open the link(s) above to verify, then remove by hand on TMDB if needed."))
+        return
+
+    # Removing anything other than a movie needs the v4 API (see
+    # remove_from_tmdb_list); without that token configured, offering to
+    # remove would just prompt toward a guaranteed failure.
+    needs_v4 = any(entry["media_type"] != "movie" for entry in non_movies)
+    if needs_v4 and not _config.TMDB_V4_ACCESS_TOKEN:
+        if not _config.TMDB_API_READ_ACCESS_TOKEN:
+            print(
+                term.dim(
+                    "  Removing non-movie items needs a TMDB v4 access token. Add your account's "
+                    "\"API Read Access Token (v4 auth)\" (TMDB Settings -> API) to .env as "
+                    "TMDB_API_READ_ACCESS_TOKEN, then run this again to set it up.\n"
+                    "  For now, open the link(s) above and remove by hand."
+                )
+            )
+            return
+
+        if not prompts.confirm("\nSet up TMDB v4 access now to enable removal?", default=False):
+            print(term.dim("  Open the link(s) above to verify, then remove by hand on TMDB if needed."))
+            return
+
+        access_token = client.acquire_v4_access_token()
+        if not access_token:
+            print(term.err("✗ Could not obtain a v4 access token; open the link(s) above and remove by hand."))
+            return
+        # Usable for the rest of this run without a restart; the printed
+        # instructions still tell the user to persist it in .env themselves.
+        _config.TMDB_V4_ACCESS_TOKEN = access_token
+
+    if not prompts.confirm(f"\nRemove these {len(non_movies)} item(s) from the TMDB list now?", default=False):
+        print(term.dim("  Left on the list -- open the link(s) above to verify by hand."))
+        return
+
+    removed = 0
+    failed = 0
+    for entry in non_movies:
+        result = remove_from_tmdb_list(client, remote_list_id, entry["id"], entry["media_type"])
+        if result["success"]:
+            removed += 1
+        else:
+            failed += 1
+            print(f"  ⚠ Could not remove {entry['title']}: {result}")
+    if removed:
+        print(term.ok(f"  ✓ Removed {removed} item(s) from the list."))
+    if failed:
+        print(term.warn(f"  {failed} item(s) could not be removed."))
+
+
 def _prompt_clean_vanished(
     client: TMDBClient,
     items: list[dict],
@@ -278,7 +394,7 @@ def _prompt_clean_vanished(
     if index is None:
         index = load_index()
     local_movies = index.get("movies", {})
-    live_ids = {int(item.get("id", 0)) for item in items if item.get("id")}
+    live_ids = _movie_only_ids(items)
     local_ids = {int(mid) for mid in local_movies}
     missing_ids = sorted(local_ids - live_ids)
 
@@ -359,14 +475,15 @@ def _save_mismatch_report(
     added_ids: set[int],
 ) -> None:
     """Write a mismatch report JSON, or remove it when no mismatch remains."""
-    live_ids = {int(item.get("id", 0)) for item in items if item.get("id")}
+    live_ids = _movie_only_ids(items)
     local_movies = index.get("movies", {})
     local_ids = {int(mid) for mid in local_movies}
 
     missing_ids = sorted(local_ids - live_ids)
     extra_ids = sorted(live_ids - local_ids)
+    non_movies = _non_movie_items(items)
 
-    if not missing_ids and not extra_ids:
+    if not missing_ids and not extra_ids and not non_movies:
         if MISMATCH_REPORT_FILE.exists():
             MISMATCH_REPORT_FILE.unlink()
             log.debug("Mismatch report removed: all clear")
@@ -399,8 +516,9 @@ def _save_mismatch_report(
             }
             for movie_id in extra_ids
             for item in items
-            if int(item.get("id", 0)) == movie_id
+            if item.get("media_type") == "movie" and int(item.get("id", 0)) == movie_id
         ],
+        "non_movie_on_list": non_movies,
         "added_ids": sorted(added_ids),
     }
 
@@ -409,9 +527,10 @@ def _save_mismatch_report(
         with open(MISMATCH_REPORT_FILE, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2, ensure_ascii=False)
         log.debug(
-            "Mismatch report saved: %d missing, %d extra",
+            "Mismatch report saved: %d missing, %d extra, %d non-movie",
             len(missing_ids),
             len(extra_ids),
+            len(non_movies),
         )
     except OSError as exc:
         log.warning("Could not write mismatch report: %s", exc)
@@ -425,7 +544,7 @@ def _render_mismatch_summary(
     """Compare local index against the live TMDB list and print a mismatch counter."""
     _save_mismatch_report(index, items, added_ids)
 
-    live_ids = {int(item.get("id", 0)) for item in items if item.get("id")}
+    live_ids = _movie_only_ids(items)
     local_ids = {int(mid) for mid in index.get("movies", {})}
 
     missing_from_list = sorted(local_ids - live_ids)
@@ -483,7 +602,7 @@ def _probe_tmdb_status(client: TMDBClient, index: dict) -> None:
             print(line)
         return
 
-    live_count = len(items)
+    live_count = len(_movie_only_ids(items))
     idx_count = len(index.get("movies", {}))
     # `incomplete` is the only real failure signal here -- a complete fetch of a
     # genuinely empty list is a successful probe, not a failed one.
@@ -493,6 +612,8 @@ def _probe_tmdb_status(client: TMDBClient, index: dict) -> None:
 
     for line in _format_host_rows([host_row]):
         print(line)
+
+    _notify_non_movie_list_items(client, items)
 
     _save_mismatch_report(index, items, set())
 
@@ -512,6 +633,8 @@ def _fetch_and_summarize_mismatches(client: TMDBClient, *, added_ids: set[int] |
     _render_mismatch_summary(index, items, added_ids)
     if incomplete:
         print(term.warn("  ⚠ List fetch was incomplete; mismatch counts may be low."))
+
+    _notify_non_movie_list_items(client, items)
 
 
 def _gaps_report_fresh(generated_at: str, max_age_minutes: int = 5) -> bool:
@@ -600,7 +723,7 @@ def run_push_url_file_only(client: TMDBClient) -> None:
         print(term.err("✗ Could not fetch the live list:"), str(exc))
         return
 
-    live_ids = {int(item.get("id", 0)) for item in live_items if item.get("id")}
+    live_ids = _movie_only_ids(live_items)
     already_present: list[dict] = []
     to_push: list[dict] = []
     for record in records:
@@ -672,9 +795,11 @@ def run_clean_vanished(client: TMDBClient) -> None:
         print(term.err("✗ Could not fetch the live list:"), str(exc))
         return
 
+    _notify_non_movie_list_items(client, items)
+
     index = load_index()
     local_movies = index.get("movies", {})
-    live_ids = {int(item.get("id", 0)) for item in items if item.get("id")}
+    live_ids = _movie_only_ids(items)
     local_ids = {int(mid) for mid in local_movies}
     missing_ids = sorted(local_ids - live_ids)
 

@@ -4,10 +4,12 @@ import httpx
 import pytest
 import respx
 
+import config.config as _config
 from src.search import (
     _parse_user_input,
     fetch_full_movie,
     push_to_tmdb_list,
+    remove_from_tmdb_list,
     search_movies,
 )
 from src.tmdb_api import TMDBClient
@@ -143,3 +145,103 @@ class TestPushToTmdbList:
         assert result["remote_push"] == "failed"
         assert "TMDB error 5" in result["reason"]
         assert route.called
+
+
+class TestRemoveFromTmdbList:
+    @respx.mock
+    def test_no_session_skips(self, client: TMDBClient) -> None:
+        result = remove_from_tmdb_list(client, 8678795, 277439)
+        assert result["success"] is False
+        assert result["remote_push"] == "skipped"
+
+    @respx.mock
+    def test_successful_removal(self, client: TMDBClient) -> None:
+        client.session_id = "fake_session"
+        route = respx.post("https://api.themoviedb.org/3/list/8678795/remove_item").mock(
+            return_value=httpx.Response(
+                200, json={"status_code": 13, "status_message": "The item/record was deleted successfully."}
+            )
+        )
+        result = remove_from_tmdb_list(client, 8678795, 277439)
+        assert result["success"] is True
+        assert result["remote_push"] == "removed"
+        assert route.called
+
+    @respx.mock
+    def test_other_tmdb_error_reported_as_failure(self, client: TMDBClient) -> None:
+        client.session_id = "fake_session"
+        route = respx.post("https://api.themoviedb.org/3/list/8678795/remove_item").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "success": False,
+                    "status_code": 5,
+                    "status_message": "Invalid format for the given parameters.",
+                },
+            )
+        )
+        result = remove_from_tmdb_list(client, 8678795, 277439)
+        assert result["success"] is False
+        assert result["remote_push"] == "failed"
+        assert "TMDB error 5" in result["reason"]
+        assert route.called
+
+
+class TestRemoveFromTmdbListV4:
+    """v3's remove_item only recognizes movies (confirmed live: a non-movie id
+    comes back "Entry not found" even though it's genuinely on the list), so
+    a non-"movie" media_type is routed to v4 instead."""
+
+    @respx.mock
+    def test_non_movie_removal_uses_v4_with_bearer_auth(self, client: TMDBClient, monkeypatch) -> None:
+        monkeypatch.setattr(_config, "TMDB_V4_ACCESS_TOKEN", "fake_v4_token")
+        client.session_id = "fake_session"  # not used by the v4 path, but shouldn't matter either way
+        route = respx.delete("https://api.themoviedb.org/4/list/8678795/items").mock(
+            return_value=httpx.Response(
+                200,
+                json={"success": True, "results": [{"media_id": 277439, "success": True}]},
+            )
+        )
+        result = remove_from_tmdb_list(client, 8678795, 277439, media_type="tv")
+        assert result["success"] is True
+        assert result["remote_push"] == "removed"
+        assert route.called
+        assert route.calls.last.request.headers["Authorization"] == "Bearer fake_v4_token"
+
+    @respx.mock
+    def test_a_per_item_v4_failure_is_reported_with_tmdbs_own_message(self, client: TMDBClient, monkeypatch) -> None:
+        monkeypatch.setattr(_config, "TMDB_V4_ACCESS_TOKEN", "fake_v4_token")
+        respx.delete("https://api.themoviedb.org/4/list/8678795/items").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "results": [{"media_id": 277439, "success": False, "status_message": "Invalid item"}],
+                },
+            )
+        )
+        result = remove_from_tmdb_list(client, 8678795, 277439, media_type="tv")
+        assert result["success"] is False
+        assert "Invalid item" in result["reason"]
+
+    def test_without_a_v4_token_it_is_skipped_with_no_network_call(self, client: TMDBClient, monkeypatch) -> None:
+        monkeypatch.setattr(_config, "TMDB_V4_ACCESS_TOKEN", "")
+        with respx.mock:
+            result = remove_from_tmdb_list(client, 8678795, 277439, media_type="tv")
+        assert result == {"success": False, "reason": "no v4 access token configured", "remote_push": "skipped"}
+
+    @respx.mock
+    def test_a_movie_still_goes_through_v3(self, client: TMDBClient, monkeypatch) -> None:
+        """The default media_type keeps existing movie-removal behaviour unchanged."""
+        monkeypatch.setattr(_config, "TMDB_V4_ACCESS_TOKEN", "fake_v4_token")
+        client.session_id = "fake_session"
+        v3_route = respx.post("https://api.themoviedb.org/3/list/8678795/remove_item").mock(
+            return_value=httpx.Response(200, json={"status_code": 13})
+        )
+        v4_route = respx.delete("https://api.themoviedb.org/4/list/8678795/items").mock(
+            return_value=httpx.Response(200, json={"success": True})
+        )
+        result = remove_from_tmdb_list(client, 8678795, 550, media_type="movie")
+        assert result["success"] is True
+        assert v3_route.called
+        assert not v4_route.called

@@ -154,6 +154,8 @@ When a private-list read or remote list write is needed, the client tries, in or
 
 Once approved, TMDB sessions are long-lived. The new session id is printed to the terminal so you can add it to `.env` as `TMDB_SESSION_ID=<id>` and reuse it across runs. Sessions are no longer stored in a separate JSON file.
 
+**Non-movie items on the list:** this tracker is movie-only, but a TMDB list can hold TV shows too (added, say, from TMDB's website). Any such item is excluded from every comparison and flagged separately with a link to verify it in a browser. Removing it is offered from the terminal, but v3 (everything else in this app) can only mutate movies — TMDB rejects a non-movie removal with "Entry not found" even though the item is genuinely on the list. Removing a non-movie item therefore goes through the v4 API instead, which needs `TMDB_V4_ACCESS_TOKEN` set in `.env`; without it, you'll be pointed at the link to remove the item by hand on TMDB's site.
+
 ---
 
 ## Project layout

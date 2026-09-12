@@ -13,6 +13,7 @@ import httpx
 import config.config as _config
 from config.config import (
     TMDB_API_BASE_URL,
+    TMDB_API_BASE_URL_V4,
     TMDB_DETAIL_WORKERS,
     TMDB_FALLBACK_REGION,
     TMDB_HTTP_TIMEOUT,
@@ -178,6 +179,25 @@ class TMDBClient:
     ) -> httpx.Response:
         return self.request("POST", path, params=params, json_body=json_body, auth=auth, retries=retries)
 
+    def request_v4(self, method: str, path: str, *, json_body: dict[str, Any] | None = None) -> httpx.Response:
+        """Make a request against the v4 API, authenticated with the v4 Bearer token.
+
+        v4 is a separate auth scheme (Bearer token, no api_key/session_id query
+        params) and a separate base path, so this bypasses ``request()``'s v3
+        auth-ladder machinery rather than bolting Bearer auth onto it. Used only
+        for the handful of things v3 cannot do at all, such as removing a
+        non-movie item from a list (see TMDB_API_BASE_URL_V4).
+        """
+        if not _config.TMDB_V4_ACCESS_TOKEN:
+            raise RuntimeError("TMDB_V4_ACCESS_TOKEN is not configured")
+        self.bucket.acquire()
+        return self.client.request(
+            method,
+            f"{TMDB_API_BASE_URL_V4}{path}",
+            json=json_body,
+            headers={"Authorization": f"Bearer {_config.TMDB_V4_ACCESS_TOKEN}"},
+        )
+
     def _session_valid(self, session_id: str) -> bool:
         try:
             resp = self.request("GET", "/account", params={"session_id": session_id}, auth=False)
@@ -244,6 +264,77 @@ class TMDBClient:
         except Exception as exc:
             logger.warning("v4 token conversion failed: %s", exc)
             return None
+
+    def _create_v4_request_token(self) -> str | None:
+        """POST /4/auth/request_token, authenticated with the static v4 read-access token.
+
+        Both v4 auth bootstrap calls (this one and the access-token exchange)
+        authenticate with the account's *read* access token -- the same one
+        that cannot write to a list -- because they're the endpoints that
+        exist to hand back a token that can.
+        """
+        if not _config.TMDB_API_READ_ACCESS_TOKEN:
+            return None
+        try:
+            self.bucket.acquire()
+            resp = self.client.request(
+                "POST",
+                f"{TMDB_API_BASE_URL_V4}/auth/request_token",
+                json={"redirect_to": "https://www.themoviedb.org/"},
+                headers={"Authorization": f"Bearer {_config.TMDB_API_READ_ACCESS_TOKEN}"},
+            )
+            data = resp.json()
+            return data.get("request_token") if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.warning("Could not create v4 request token: %s", exc)
+            return None
+
+    def _exchange_v4_access_token(self, request_token: str) -> str | None:
+        """POST /4/auth/access_token: trade an approved request token for a real user access token."""
+        try:
+            self.bucket.acquire()
+            resp = self.client.request(
+                "POST",
+                f"{TMDB_API_BASE_URL_V4}/auth/access_token",
+                json={"request_token": request_token},
+                headers={"Authorization": f"Bearer {_config.TMDB_API_READ_ACCESS_TOKEN}"},
+            )
+            data = resp.json()
+            return data.get("access_token") if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.warning("Could not exchange v4 request token: %s", exc)
+            return None
+
+    def acquire_v4_access_token(self) -> str | None:
+        """Walk TMDB's v4 browser-approval flow and return a fresh, user-authorized access token.
+
+        Needs TMDB_API_READ_ACCESS_TOKEN configured (the static "API Read
+        Access Token" from TMDB's account settings). That token alone cannot
+        write to a list; this exchanges it -- via the user approving access
+        in a browser -- for one that can, the same token this client expects
+        as TMDB_V4_ACCESS_TOKEN elsewhere.
+        """
+        if not _config.TMDB_API_READ_ACCESS_TOKEN:
+            logger.warning("TMDB_API_READ_ACCESS_TOKEN is not configured; cannot start the v4 auth flow")
+            return None
+        token = self._create_v4_request_token()
+        if not token:
+            return None
+        url = f"https://www.themoviedb.org/auth/access?request_token={token}"
+        print()
+        print(f"Opening browser for TMDB v4 approval: {url}")
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            logger.warning("Could not open browser: %s", exc)
+        input("Press Enter after approving TMDB v4 access in your browser...")
+        access_token = self._exchange_v4_access_token(token)
+        if access_token:
+            print()
+            print(f"New TMDB v4 access token: {access_token}")
+            print("Add it to your .env file so it is reused on the next run:")
+            print(f"  TMDB_V4_ACCESS_TOKEN={access_token}")
+        return access_token
 
     def _browser_approval_flow(self) -> str | None:
         token = self._create_request_token()

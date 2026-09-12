@@ -122,6 +122,106 @@ class TestEnrichOne:
         assert "gone_since" in membership
 
 
+def _minimal_movie_json(
+    movie_id: int,
+    *,
+    status: str = "Released",
+    runtime: int = 118,
+    title: str = "Test Movie",
+    release_date: str = "2020-01-01",
+) -> dict:
+    """The smallest TMDB /movie/{id} response _enrich_one can fully process.
+
+    Every optional section (collection, keywords, credits) is left empty so
+    _resolve_collection/_resolve_connected_tv/download_poster all no-op --
+    keeps these tests independent of the captured-fixture files.
+    """
+    return {
+        "id": movie_id,
+        "title": title,
+        "original_title": title,
+        "release_date": release_date,
+        "status": status,
+        "runtime": runtime,
+        "overview": "",
+        "tagline": "",
+        "genres": [],
+        "original_language": "en",
+        "production_companies": [],
+        "production_countries": [],
+        "release_dates": {"results": []},
+        "credits": {"cast": [], "crew": []},
+        "keywords": {"keywords": []},
+        "external_ids": {},
+        "belongs_to_collection": None,
+        "poster_path": None,
+    }
+
+
+class TestEnrichOneChangeDetection:
+    """A re-enrich must say what changed, not just silently overwrite it."""
+
+    @respx.mock
+    def test_a_movies_first_enrichment_reports_no_changes(
+        self, tmp_project: Path, fake_image_client, client: TMDBClient
+    ) -> None:
+        movie_id = 101
+        respx.get(f"https://api.themoviedb.org/3/movie/{movie_id}").mock(
+            return_value=httpx.Response(200, json=_minimal_movie_json(movie_id))
+        )
+        index = load_index()
+        details = {"movies": {}}
+        membership, detail = ensure_record_exists(index, details, movie_id)
+
+        changes = _enrich_one(client, membership, detail, _LockedCache(), _LockedListCache(), fake_image_client)
+
+        assert changes == []
+
+    @respx.mock
+    def test_a_status_and_runtime_change_is_reported(
+        self, tmp_project: Path, fake_image_client, client: TMDBClient
+    ) -> None:
+        movie_id = 102
+        respx.get(f"https://api.themoviedb.org/3/movie/{movie_id}").mock(
+            return_value=httpx.Response(200, json=_minimal_movie_json(movie_id, status="Released", runtime=118))
+        )
+        index = load_index()
+        details = {"movies": {}}
+        membership, detail = ensure_record_exists(index, details, movie_id)
+        # Simulate a movie enriched previously with now-stale data.
+        membership["title"] = "Test Movie"
+        membership["release_date"] = "2020-01-01"
+        membership["status"] = "Post Production"
+        detail["runtime"] = 90
+        detail["enriched_at"] = "2025-01-01T00:00:00Z"
+
+        changes = _enrich_one(client, membership, detail, _LockedCache(), _LockedListCache(), fake_image_client)
+
+        by_field = {field: (old, new) for field, old, new in changes}
+        assert by_field["Status"] == ("Post Production", "Released")
+        assert by_field["Runtime"] == ("90 min", "118 min")
+        assert "Title" not in by_field
+
+    @respx.mock
+    def test_nothing_changed_reports_no_changes(self, tmp_project: Path, fake_image_client, client: TMDBClient) -> None:
+        movie_id = 103
+        respx.get(f"https://api.themoviedb.org/3/movie/{movie_id}").mock(
+            return_value=httpx.Response(200, json=_minimal_movie_json(movie_id, status="Released", runtime=118))
+        )
+        index = load_index()
+        details = {"movies": {}}
+        membership, detail = ensure_record_exists(index, details, movie_id)
+        membership["title"] = "Test Movie"
+        membership["release_date"] = "2020-01-01"
+        membership["status"] = "Released"
+        detail["runtime"] = 118
+        detail["enriched_at"] = "2025-01-01T00:00:00Z"
+
+        changes = _enrich_one(client, membership, detail, _LockedCache(), _LockedListCache(), fake_image_client)
+
+        assert changes == []
+
+
 class TestRunFullScanReporting:
     """Full scan must name which movies it touched, not just print a count."""
 
@@ -168,3 +268,23 @@ class TestRunFullScanReporting:
         saved = load_index()
         assert saved["movies"]["1"]["title"] == "Movie One (enriched)"
         assert saved["movies"]["2"]["gone"] is True
+
+    def test_reports_per_field_changes_returned_by_enrich_one(
+        self,
+        tmp_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        client: TMDBClient,
+    ) -> None:
+        save_index({"movies": {"1": {"id": 1, "title": "Movie One", "release_date": "2020-01-01"}}})
+
+        def fake_enrich_one(_client, membership, _detail, _coll_cache, _kw_cache, _image_client):
+            return [("Status", "Post Production", "Released")]
+
+        monkeypatch.setattr(enrich_mod, "_enrich_one", fake_enrich_one)
+
+        enrich_mod.run_full_scan(client, force=True, resume=False)
+
+        out = capsys.readouterr().out
+        assert "Status: Post Production → Released" in out
+        assert "1 had field changes (see above)." in out

@@ -79,6 +79,51 @@ class TestTMDBClient:
             client.close()
 
 
+class TestV4AuthBootstrap:
+    """The v4 auth flow that trades a read-only "API Read Access Token" for a
+    real, write-capable v4 access token -- needed because v3's remove_item
+    can't touch non-movie list items at all (confirmed live: "Entry not
+    found" even when the item is genuinely on the list)."""
+
+    @respx.mock
+    def test_create_v4_request_token_uses_the_read_access_token_as_bearer(
+        self, client: TMDBClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("config.config.TMDB_API_READ_ACCESS_TOKEN", "fake_read_token")
+        route = respx.post("https://api.themoviedb.org/4/auth/request_token").mock(
+            return_value=httpx.Response(200, json={"success": True, "request_token": "req123"})
+        )
+        assert client._create_v4_request_token() == "req123"
+        assert route.calls.last.request.headers["Authorization"] == "Bearer fake_read_token"
+
+    def test_create_v4_request_token_without_a_read_access_token_makes_no_call(
+        self, client: TMDBClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("config.config.TMDB_API_READ_ACCESS_TOKEN", "")
+        with respx.mock:
+            assert client._create_v4_request_token() is None
+
+    @respx.mock
+    def test_exchange_v4_access_token_returns_the_new_token(
+        self, client: TMDBClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("config.config.TMDB_API_READ_ACCESS_TOKEN", "fake_read_token")
+        route = respx.post("https://api.themoviedb.org/4/auth/access_token").mock(
+            return_value=httpx.Response(200, json={"success": True, "access_token": "final_v4_token"})
+        )
+        assert client._exchange_v4_access_token("req123") == "final_v4_token"
+        request = route.calls.last.request
+        assert request.headers["Authorization"] == "Bearer fake_read_token"
+        assert b'"request_token":"req123"' in request.content.replace(b" ", b"")
+
+    def test_acquire_v4_access_token_without_a_read_access_token_returns_none_and_makes_no_call(
+        self, client: TMDBClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("config.config.TMDB_API_READ_ACCESS_TOKEN", "")
+        with respx.mock:
+            assert client.acquire_v4_access_token() is None
+
+
 class TestPickCertification:
     def test_prefers_origin_country(self) -> None:
         results = [

@@ -5,6 +5,7 @@ import re
 
 import httpx
 
+import config.config as _config
 from config.config import TMDB_LANGUAGE
 from src.index import (
     build_membership_record,
@@ -367,4 +368,92 @@ def push_to_tmdb_list(client: TMDBClient, list_id: str | int, movie_id: int) -> 
         return {"success": True, "reason": "ok", "remote_push": "ok"}
     except httpx.HTTPError as exc:
         logger.error("Remote push failed: %s", exc)
+        return {"success": False, "reason": str(exc), "remote_push": "failed"}
+
+
+def remove_from_tmdb_list(client: TMDBClient, list_id: str | int, media_id: int, media_type: str = "movie") -> dict:
+    """Remove an item from the remote TMDB list.
+
+    v3's remove_item only recognizes movies -- confirmed live: a non-movie id
+    comes back as status_code 21 "Entry not found" even though it is genuinely
+    on the list (v3's own list-fetch returns every media type, but its
+    mutation endpoints don't). v4's typed list-items endpoint is the only way
+    to remove anything else, so movies keep using v3 (matching
+    push_to_tmdb_list) and everything else goes through v4.
+    """
+    if media_type != "movie":
+        return _remove_from_tmdb_list_v4(client, list_id, media_id, media_type)
+
+    if not client.session_id:
+        return {"success": False, "reason": "no session", "remote_push": "skipped"}
+    try:
+        resp = client.post(
+            f"/list/{list_id}/remove_item",
+            json_body={"media_id": media_id},
+        )
+        body = resp.json() if resp.text else {}
+        if not isinstance(body, dict):
+            body = {}
+        status_code = body.get("status_code")
+        status_message = body.get("status_message", "unknown")
+
+        # status_code 13 = deleted successfully.
+        if status_code == 13:
+            return {"success": True, "reason": "ok", "remote_push": "removed"}
+
+        # Any other TMDB JSON status is a real failure; raise so the real message is logged.
+        if status_code is not None:
+            raise httpx.HTTPStatusError(
+                f"TMDB error {status_code}: {status_message}",
+                request=resp.request,
+                response=resp,
+            )
+
+        resp.raise_for_status()
+        return {"success": True, "reason": "ok", "remote_push": "removed"}
+    except httpx.HTTPError as exc:
+        logger.error("Remote removal failed: %s", exc)
+        return {"success": False, "reason": str(exc), "remote_push": "failed"}
+
+
+def _remove_from_tmdb_list_v4(client: TMDBClient, list_id: str | int, media_id: int, media_type: str) -> dict:
+    """Remove a non-movie item via v4's typed list-items endpoint.
+
+    v4 replies with a top-level status plus a per-item ``results`` entry
+    (``{"media_id": ..., "success": ...}``); the per-item entry is checked
+    first since a batch call can partially fail.
+    """
+    if not _config.TMDB_V4_ACCESS_TOKEN:
+        return {"success": False, "reason": "no v4 access token configured", "remote_push": "skipped"}
+    try:
+        resp = client.request_v4(
+            "DELETE",
+            f"/list/{list_id}/items",
+            json_body={"items": [{"media_type": media_type, "media_id": media_id}]},
+        )
+        body = resp.json() if resp.text else {}
+        if not isinstance(body, dict):
+            body = {}
+
+        results = body.get("results")
+        item_result = None
+        if isinstance(results, list):
+            item_result = next(
+                (r for r in results if isinstance(r, dict) and r.get("media_id") == media_id),
+                None,
+            )
+        if item_result is not None:
+            if item_result.get("success"):
+                return {"success": True, "reason": "ok", "remote_push": "removed"}
+            reason = item_result.get("status_message", "unknown v4 error")
+            return {"success": False, "reason": reason, "remote_push": "failed"}
+
+        if body.get("success"):
+            return {"success": True, "reason": "ok", "remote_push": "removed"}
+
+        resp.raise_for_status()
+        reason = body.get("status_message", "unexpected v4 response")
+        return {"success": False, "reason": reason, "remote_push": "failed"}
+    except httpx.HTTPError as exc:
+        logger.error("v4 remote removal failed: %s", exc)
         return {"success": False, "reason": str(exc), "remote_push": "failed"}

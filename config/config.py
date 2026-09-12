@@ -67,6 +67,11 @@ TMDB_LIST_ID=your_list_id_here
 # Optional: session allows private list reads and list writes.
 TMDB_SESSION_ID=
 TMDB_V4_ACCESS_TOKEN=
+# Only needed to remove a non-movie item from the list -- paste the static
+# "API Read Access Token (v4 auth)" from your TMDB account's API settings
+# page here, then use that menu option once to trade it for a real
+# TMDB_V4_ACCESS_TOKEN above (the read-access token itself can't write).
+TMDB_API_READ_ACCESS_TOKEN=
 TMDB_USERNAME=
 TMDB_PASSWORD=
 
@@ -93,6 +98,10 @@ def ensure_env_file():
 
 # ==================== API SETTINGS ====================
 TMDB_API_BASE_URL = "https://api.themoviedb.org/3"
+# v4 is only used for the handful of operations v3 cannot do at all -- e.g.
+# removing a non-movie item from a list, since v3's remove_item only
+# recognizes movies even though v3's own list-fetch returns every media type.
+TMDB_API_BASE_URL_V4 = "https://api.themoviedb.org/4"
 TMDB_READ_MAX_RETRIES = int(os.getenv("TMDB_READ_MAX_RETRIES", "3"))
 TMDB_READ_RETRY_DELAY = float(os.getenv("TMDB_READ_RETRY_DELAY", "5"))
 TMDB_MAX_REQUESTS_PER_SECOND = float(os.getenv("TMDB_MAX_REQUESTS_PER_SECOND", "30"))
@@ -121,6 +130,7 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY", "").strip()
 TMDB_LIST_ID = os.getenv("TMDB_LIST_ID", "").strip()
 TMDB_SESSION_ID = os.getenv("TMDB_SESSION_ID", "").strip()
 TMDB_V4_ACCESS_TOKEN = os.getenv("TMDB_V4_ACCESS_TOKEN", "").strip()
+TMDB_API_READ_ACCESS_TOKEN = os.getenv("TMDB_API_READ_ACCESS_TOKEN", "").strip()
 TMDB_USERNAME = os.getenv("TMDB_USERNAME", "").strip()
 TMDB_PASSWORD = os.getenv("TMDB_PASSWORD", "").strip()
 

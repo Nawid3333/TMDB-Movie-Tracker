@@ -245,6 +245,27 @@ def _extract_titles(movie: dict, language: str = TMDB_LANGUAGE) -> dict[str, str
     }
 
 
+def _enrichment_snapshot(membership: dict, details: dict) -> dict[str, str]:
+    """A comparable, display-ready snapshot of the fields worth telling the user about.
+
+    Deliberately narrow: cast/crew/keywords/overview churn on TMDB constantly
+    and would swamp a change report in noise. These are the fields a re-enrich
+    can change that actually matter to someone tracking whether a film is
+    watchable yet (status, release date) or worth re-checking (runtime,
+    certification, a finalized title).
+    """
+    cert = details.get("certification")
+    rating = cert.get("rating") if isinstance(cert, dict) else None
+    runtime = details.get("runtime")
+    return {
+        "Title": membership.get("title") or "(none)",
+        "Release date": membership.get("release_date") or "(none)",
+        "Status": membership.get("status") or "(none)",
+        "Runtime": f"{runtime} min" if runtime else "(none)",
+        "Certification": rating or "(none)",
+    }
+
+
 def _enrich_one(
     client: TMDBClient,
     membership: dict,
@@ -252,8 +273,16 @@ def _enrich_one(
     collection_cache: _LockedCache,
     keyword_tv_cache: _LockedListCache,
     image_client: Any,
-) -> None:
-    """Fetch and merge full details for a single movie."""
+) -> list[tuple[str, str, str]]:
+    """Fetch and merge full details for a single movie.
+
+    Returns a list of (field, old_value, new_value) for fields that changed
+    since the last time this movie was enriched -- empty on a movie's first
+    enrichment (nothing to compare against yet) or when nothing changed.
+    """
+    was_enriched_before = bool(details.get("enriched_at"))
+    before = _enrichment_snapshot(membership, details) if was_enriched_before else None
+
     movie_id = membership["id"]
     params = {"language": TMDB_LANGUAGE, "append_to_response": _APPEND_TO_RESPONSE}
     resp = client.get(f"/movie/{movie_id}", params=params)
@@ -262,7 +291,7 @@ def _enrich_one(
         membership["gone"] = True
         membership["gone_since"] = membership.get("gone_since") or now_iso()
         logger.info("Movie %s no longer resolves on TMDB; marked gone", movie_id)
-        return
+        return []
     resp.raise_for_status()
     movie = resp.json()
     if not isinstance(movie, dict):
@@ -346,6 +375,11 @@ def _enrich_one(
 
     details["enriched_at"] = now_iso()
 
+    if before is None:
+        return []
+    after = _enrichment_snapshot(membership, details)
+    return [(field, before[field], after[field]) for field in before if before[field] != after[field]]
+
 
 def _load_checkpoint() -> set[int]:
     from config.config import ENRICH_CHECKPOINT_FILE
@@ -413,6 +447,7 @@ def run_full_scan(
     enriched: list[str] = []
     gone: list[str] = []
     failed: list[str] = []
+    changed_count = 0
     try:
         image_client = httpx.Client(timeout=30)
         with concurrent.futures.ThreadPoolExecutor(max_workers=TMDB_DETAIL_WORKERS) as executor:
@@ -438,7 +473,7 @@ def run_full_scan(
                 movie_id = futures[future]
                 membership = membership_by_id[movie_id]
                 try:
-                    future.result()
+                    changes = future.result()
                     done.add(movie_id)
                     now = time.monotonic()
                     if now - last_checkpoint >= checkpoint_interval:
@@ -453,6 +488,10 @@ def run_full_scan(
                     else:
                         enriched.append(label)
                         print(f"  ✓ {label}")
+                        if changes:
+                            changed_count += 1
+                            for field, old_value, new_value in changes:
+                                print(f"      {field}: {old_value} → {new_value}")
                     logger.debug("Enriched %s", movie_id)
                 except Exception as exc:
                     logger.error("Failed to enrich %s: %s", movie_id, exc)
@@ -470,6 +509,8 @@ def run_full_scan(
     save_details(details)
     _save_checkpoint(set())
     print(f"Full scan complete. Enriched {len(enriched)} {'movie' if len(enriched) == 1 else 'movies'}.")
+    if changed_count:
+        print(f"  {changed_count} had field changes (see above).")
     if gone:
         print(f"  {len(gone)} marked gone (no longer on TMDB).")
     if failed:
