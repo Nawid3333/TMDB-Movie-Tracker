@@ -55,9 +55,7 @@ class TestMismatchReportIgnoresNonMovies:
         assert report["extra_on_list_count"] == 0
         assert report["extra_on_list"] == []
 
-    def test_the_tv_show_is_surfaced_separately_instead_of_silently_dropped(
-        self, _movie_index, tmp_path, monkeypatch
-    ):
+    def test_the_tv_show_is_surfaced_separately_instead_of_silently_dropped(self, _movie_index, tmp_path, monkeypatch):
         report_path = tmp_path / "mismatch_report.json"
         monkeypatch.setattr(main, "MISMATCH_REPORT_FILE", report_path)
 
