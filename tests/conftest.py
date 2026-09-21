@@ -75,6 +75,7 @@ def tmp_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("config.config.COLLECTION_CACHE_FILE", data_dir / "collection_cache.json")
     monkeypatch.setattr("config.config.KEYWORD_TV_CACHE_FILE", data_dir / "keyword_tv_cache.json")
     monkeypatch.setattr("config.config.GAPS_FILE", data_dir / "gaps.json")
+    monkeypatch.setattr("config.config.FRANCHISE_GAPS_EXPORT_FILE", data_dir / "franchise_gaps_urls.txt")
     monkeypatch.setattr("config.config.ENRICH_CHECKPOINT_FILE", data_dir / "enrich_checkpoint.json")
     monkeypatch.setattr("config.config.POSTERS_DIR", data_dir / "posters")
     monkeypatch.setattr("config.config.LOG_FILE", logs_dir / "movie_tracker.log")

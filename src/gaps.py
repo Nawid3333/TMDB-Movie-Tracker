@@ -133,6 +133,17 @@ def _find_connected_tv(
     return tv
 
 
+def _coerce_id_set(raw: Any) -> set[int]:
+    """Return a set of ints from a JSON list, skipping unusable values."""
+    ids: set[int] = set()
+    for value in raw or []:
+        try:
+            ids.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
 def find_gaps(*, persist: bool = True) -> dict:
     """Find connected films and TV series not yet in the index.
 
@@ -142,7 +153,12 @@ def find_gaps(*, persist: bool = True) -> dict:
     FRANCHISE_KEYWORD_MIN_MOVIES films in the index, or its name shares
     a significant token with a collection name of one of the indexed films.
 
-    The result is optionally written to ``GAPS_FILE``.
+    Every run is recomputed from the current index -- the previous report is
+    never substituted for a fresh one. It is consulted only to flag each
+    entry with ``is_new`` (never shown in an earlier report) or previously
+    shown, so repeat runs highlight just what changed. When ``persist`` is
+    true the report is written to ``GAPS_FILE`` and the shown-sets are
+    updated, marking everything in this report as seen for the next run.
     """
     index = load_index()
     details = load_details()
@@ -158,9 +174,22 @@ def find_gaps(*, persist: bool = True) -> dict:
     missing_films.sort(key=lambda x: (x.get("release_date") or "", x.get("title", "")))
     connected_tv.sort(key=lambda x: (x.get("first_air_date") or "", x.get("name", "")))
 
+    previous = load_gaps()
+    prev_film_ids = _coerce_id_set(previous.get("shown_films"))
+    prev_tv_ids = _coerce_id_set(previous.get("shown_tv"))
+    for film in missing_films:
+        film["is_new"] = film["id"] not in prev_film_ids
+    for show in connected_tv:
+        show["is_new"] = show["id"] not in prev_tv_ids
+
     result = {
         "missing_films": missing_films,
         "connected_tv": connected_tv,
+        # Shown-sets snapshot exactly what this report contains, so the next
+        # run treats these ids as previously shown. Films that later get
+        # indexed simply vanish from both lists.
+        "shown_films": sorted(film["id"] for film in missing_films),
+        "shown_tv": sorted(show["id"] for show in connected_tv),
         "indexed_count": len(indexed_ids),
         "generated_at": now_iso(),
     }

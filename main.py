@@ -5,12 +5,11 @@ import logging
 import os
 import shutil
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import config.config as _config
 from config.config import (
     DEFAULT_BATCH_FILE,
-    FRANCHISE_GAPS_EXPORT_FILE,
     GAPS_FILE,
     LOG_FILE,
     MIN_SHRINK_RATIO,
@@ -21,7 +20,7 @@ from config.config import (
 )
 from src.changes import apply_changes, detect_changes
 from src.enrich import run_full_scan as enrich_run_full_scan
-from src.gaps import find_gaps, load_gaps
+from src.gaps import find_gaps
 from src.index import load_index, now_iso, save_index
 from src.list_fetcher import ListFetchError, fetch_list
 from src.search import (
@@ -343,7 +342,7 @@ def _notify_non_movie_list_items(client: TMDBClient, items: list[dict]) -> None:
             print(
                 term.dim(
                     "  Removing non-movie items needs a TMDB v4 access token. Add your account's "
-                    "\"API Read Access Token (v4 auth)\" (TMDB Settings -> API) to .env as "
+                    '"API Read Access Token (v4 auth)" (TMDB Settings -> API) to .env as '
                     "TMDB_API_READ_ACCESS_TOKEN, then run this again to set it up.\n"
                     "  For now, open the link(s) above and remove by hand."
                 )
@@ -637,17 +636,6 @@ def _fetch_and_summarize_mismatches(client: TMDBClient, *, added_ids: set[int] |
     _notify_non_movie_list_items(client, items)
 
 
-def _gaps_report_fresh(generated_at: str, max_age_minutes: int = 5) -> bool:
-    """Return True when ``generated_at`` is within ``max_age_minutes``."""
-    try:
-        dt = datetime.fromisoformat(generated_at)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        return datetime.now(UTC) - dt <= timedelta(minutes=max_age_minutes)
-    except Exception:
-        return False
-
-
 def _select_batch_source() -> str:
     """Prompt for a batch source, defaulting to the configured file."""
     default = str(DEFAULT_BATCH_FILE)
@@ -872,28 +860,79 @@ def run_clean_vanished(client: TMDBClient) -> None:
             _fetch_and_summarize_mismatches(client, added_ids=set(rescrape_ids))
 
 
+def _gap_url(item: dict) -> str:
+    """Return the TMDB link for a gap entry (movie or connected TV)."""
+    item_id = item.get("id")
+    if item.get("source") == "keyword_tv":
+        return f"https://www.themoviedb.org/tv/{item_id}"
+    return f"https://www.themoviedb.org/movie/{item_id}"
+
+
+def _write_gaps_export(gaps: dict) -> str:
+    """Rewrite the franchise-gaps URL file from scratch, new finds on top.
+
+    The file is regenerated on every run instead of being appended to:
+    entries the user was already shown in an earlier report are parked under
+    a "Previously shown" heading, so only the "New" section ever needs
+    reading. Titles ride along as trailing comments; the batch importer
+    resolves the URL out of each line and ignores the rest, so the file
+    stays directly usable as a push queue.
+    """
+    target_path = os.path.abspath(str(_config.FRANCHISE_GAPS_EXPORT_FILE))
+    missing = [m for m in gaps.get("missing_films", []) if m.get("source") == "collection"]
+    new_items = [m for m in missing if m.get("is_new")]
+    prev_items = [m for m in missing if not m.get("is_new")]
+
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    lines: list[str] = [
+        f"# Franchise gaps export — {timestamp}",
+        f"# {len(missing)} missing film(s): {len(new_items)} new, {len(prev_items)} previously shown",
+        "",
+    ]
+
+    def _entry(item: dict) -> str:
+        label = title_line(item)
+        url = _gap_url(item)
+        return f"{url}  # {label}" if label else url
+
+    if new_items:
+        lines.append(f"# ── New since last run ({len(new_items)}) ──")
+        lines.extend(_entry(item) for item in new_items)
+    elif missing:
+        lines.append("# ── Nothing new since last run ──")
+    else:
+        lines.append("# ── No missing franchise films ──")
+    lines.append("")
+
+    if prev_items:
+        lines.append(f"# ── Previously shown ({len(prev_items)}) ──")
+        lines.extend(_entry(item) for item in prev_items)
+        lines.append("")
+
+    try:
+        os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
+        with open(target_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines).rstrip("\n") + "\n")
+    except OSError as exc:
+        log.error("Could not write gaps export %s: %s", target_path, exc)
+        print(term.err(f"  ✗ Could not write {target_path}: {exc}"))
+    return target_path
+
+
 def run_franchise_gaps(_client: _TMDBClientLike) -> None:
-    """Report connected films and TV not in the index."""
+    """Report connected films and TV not in the index.
+
+    Always recomputed from the current index; the last persisted report is
+    only consulted to separate new findings from previously shown ones.
+    """
     log.debug("Franchise gaps selected")
     print()
     print(term.step("→ Franchise gaps"))
 
-    cached = load_gaps()
-    if cached and _gaps_report_fresh(cached.get("generated_at", "")):
-        log.debug("Reusing cached gaps report from %s", cached.get("generated_at"))
-        print("  → Reusing cached report")
-        gaps = cached
-    else:
-        gaps = find_gaps()
+    gaps = find_gaps()
 
     print()
     print(term.step(f"Franchise gaps ({gaps['indexed_count']} films in index)"))
-
-    def _gap_url(item: dict) -> str:
-        item_id = item.get("id")
-        if item.get("source") == "keyword_tv":
-            return f"https://www.themoviedb.org/tv/{item_id}"
-        return f"https://www.themoviedb.org/movie/{item_id}"
 
     def _print_gap_table(items: list[dict], suffix: str = "") -> None:
         if not items:
@@ -910,76 +949,41 @@ def run_franchise_gaps(_client: _TMDBClientLike) -> None:
             print(f"    {i:<{idx_w}}  {label:<{title_w}}  {_gap_url(item)}")
 
     missing = gaps.get("missing_films", [])
-    if missing:
-        print()
-        print(term.bold(f"Missing franchise films: {len(missing)}"))
-        _print_gap_table(missing)
+    new_films = [m for m in missing if m.get("is_new")]
+    prev_films = [m for m in missing if not m.get("is_new")]
+
+    print()
+    print(term.bold(f"Missing franchise films: {len(missing)} ({len(new_films)} new)"))
+    if new_films:
+        _print_gap_table(new_films)
     else:
+        print(term.ok("  ✓ Nothing new since last run."))
+    if prev_films:
         print()
-        print(term.ok("  ✓ No missing franchise films."))
+        print(term.dim(f"Previously shown: {len(prev_films)}"))
+        _print_gap_table(prev_films)
 
     tv = gaps.get("connected_tv", [])
+    new_tv = [t for t in tv if t.get("is_new")]
+    prev_tv = [t for t in tv if not t.get("is_new")]
     if tv:
         print()
-        print(term.bold(f"Connected TV series: {len(tv)}"))
-        _print_gap_table(tv)
+        print(term.bold(f"Connected TV series: {len(tv)} ({len(new_tv)} new)"))
+        if new_tv:
+            _print_gap_table(new_tv)
+        if prev_tv:
+            print()
+            print(term.dim(f"Previously shown: {len(prev_tv)}"))
+            _print_gap_table(prev_tv)
     else:
         print()
         print(term.ok("  ✓ No connected TV series."))
 
-    # Persist / surface the gaps JSON path
+    # The URL export is rewritten fresh on every run, new items on top.
+    export_path = _write_gaps_export(gaps)
     print()
     print(f"  Report saved to: {GAPS_FILE}")
-
-    # Offer to export missing franchise film URLs to a text file (append-only, deduplicated).
-    if missing and prompts.confirm("Export missing franchise film URLs to a text file?", default=False):
-        default_target = str(FRANCHISE_GAPS_EXPORT_FILE)
-        target = input(f"Target file [default: {default_target}]: ").strip()
-        if not target:
-            target = default_target
-
-        # Use an absolute path consistently for both reading and writing.
-        target_path = os.path.abspath(target)
-
-        existing_lines: list[str] = []
-        if os.path.exists(target_path) and os.path.isfile(target_path):
-            try:
-                with open(target_path, encoding="utf-8") as fh:
-                    existing_lines = [line.rstrip("\n") for line in fh]
-            except OSError as exc:
-                log.warning("Could not read existing target file %s: %s", target_path, exc)
-
-        # Normalize URLs for deduplication while preserving the user's original lines.
-        existing_normalized = {line.strip() for line in existing_lines}
-
-        new_urls: list[str] = []
-        for item in missing:
-            if item.get("source") != "collection":
-                continue
-            url = _gap_url(item)
-            if url.strip() in existing_normalized:
-                continue
-            existing_normalized.add(url.strip())
-            new_urls.append(url)
-
-        if not new_urls:
-            print("  → No new URLs to add (all already present in file).")
-        else:
-            try:
-                # Use a header comment to visually separate an export batch.
-                timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-                header = f"# Franchise gaps export — {timestamp} — {len(new_urls)} URL(s)"
-                os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
-                with open(target_path, "a", encoding="utf-8") as fh:
-                    # Ensure a blank line before the header when appending to existing content.
-                    if existing_lines and existing_lines[-1].strip():
-                        fh.write("\n")
-                    fh.write(header + "\n")
-                    fh.write("\n".join(new_urls) + "\n")
-                print(term.ok(f"  ✓ Appended {len(new_urls)} URL(s) to {target_path}"))
-            except OSError as exc:
-                log.error("Could not append to %s: %s", target_path, exc)
-                print(term.err(f"  ✗ Could not write to {target_path}: {exc}"))
+    print(f"  URL export:      {export_path}")
 
 
 def check_api_key() -> bool:

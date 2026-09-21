@@ -16,7 +16,7 @@ class _FakeClient:
 
 
 class TestFranchiseGapsExport:
-    """Coverage for the append-only, deduplicated export in run_franchise_gaps."""
+    """Coverage for the always-fresh, two-section export in run_franchise_gaps."""
 
     @pytest.fixture
     def gaps_fixture(self, tmp_project):
@@ -50,67 +50,88 @@ class TestFranchiseGapsExport:
         )
         return find_gaps(persist=False)
 
-    def test_export_appends_missing_urls(self, gaps_fixture, tmp_path, monkeypatch):
-        """Exporting missing films appends URLs to the target file."""
+    def test_export_written_without_prompts(self, gaps_fixture, tmp_project):
+        """The export file is written on every run without asking."""
+        import config.config as _config
         from main import run_franchise_gaps
-
-        target = tmp_path / "franchise_gaps_urls.txt"
-
-        monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
-        monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
 
         run_franchise_gaps(_FakeClient())
 
-        text = target.read_text(encoding="utf-8")
+        text = _config.FRANCHISE_GAPS_EXPORT_FILE.read_text(encoding="utf-8")
         assert "https://www.themoviedb.org/movie/2" in text
         assert "https://www.themoviedb.org/movie/3" in text
-        assert text.count("# Franchise gaps export") == 1
 
-    def test_export_does_not_overwrite_existing_file(self, gaps_fixture, tmp_path, monkeypatch):
-        """Existing content in the target file is preserved."""
+    def test_export_separates_new_from_previously_shown(self, gaps_fixture, tmp_project):
+        """First run puts both films under New; second run moves them down."""
+        import config.config as _config
         from main import run_franchise_gaps
 
-        target = tmp_path / "franchise_gaps_urls.txt"
-        target.write_text("# Existing\nhttps://www.themoviedb.org/movie/999\n", encoding="utf-8")
+        target = _config.FRANCHISE_GAPS_EXPORT_FILE
 
-        monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
-        monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
+        # First run: everything is new.
+        run_franchise_gaps(_FakeClient())
+        first = target.read_text(encoding="utf-8")
+        assert "── New since last run (2) ──" in first
+        assert "── Previously shown" not in first
+
+        # Second run: same gaps, but now flagged as previously shown.
+        run_franchise_gaps(_FakeClient())
+        second = target.read_text(encoding="utf-8")
+        assert "── New since last run" not in second
+        assert "── Nothing new since last run ──" in second
+        assert "── Previously shown (2) ──" in second
+        assert second.index("── Previously shown") < second.index("movie/2")
+
+    def test_export_rewritten_fresh_each_run(self, gaps_fixture, tmp_project):
+        """Stale manual content disappears -- the file is rewritten, not appended."""
+        import config.config as _config
+        from main import run_franchise_gaps
+
+        target = _config.FRANCHISE_GAPS_EXPORT_FILE
+        target.write_text("# Stale header\nhttps://www.themoviedb.org/movie/999\n", encoding="utf-8")
 
         run_franchise_gaps(_FakeClient())
 
         text = target.read_text(encoding="utf-8")
-        assert "# Existing" in text
-        assert "https://www.themoviedb.org/movie/999" in text
-        assert "https://www.themoviedb.org/movie/2" in text
+        assert "# Stale header" not in text
+        assert "https://www.themoviedb.org/movie/999" not in text
+        assert text.startswith("# Franchise gaps export")
+        assert "movie/2" in text
 
-    def test_export_deduplicates_urls(self, gaps_fixture, tmp_path, monkeypatch):
-        """URLs already present in the target file are not added again."""
+    def test_export_includes_titles_as_comments(self, gaps_fixture, tmp_project):
+        """Each URL line carries its title so links can be read at a glance."""
+        import config.config as _config
         from main import run_franchise_gaps
 
-        target = tmp_path / "franchise_gaps_urls.txt"
-        target.write_text(
-            "https://www.themoviedb.org/movie/2\n",
-            encoding="utf-8",
+        run_franchise_gaps(_FakeClient())
+
+        text = _config.FRANCHISE_GAPS_EXPORT_FILE.read_text(encoding="utf-8")
+        assert "https://www.themoviedb.org/movie/2  # Missing Two (2021)" in text
+        assert "https://www.themoviedb.org/movie/3  # Missing Three (2022)" in text
+
+    def test_indexed_films_leave_the_report(self, gaps_fixture, tmp_project):
+        """Adding a gap film to the index removes it from the next report."""
+        import config.config as _config
+        from main import run_franchise_gaps
+
+        target = _config.FRANCHISE_GAPS_EXPORT_FILE
+        run_franchise_gaps(_FakeClient())
+        assert "movie/2" in target.read_text(encoding="utf-8")
+
+        # User pushes film 2 via the batch flow -> it enters the index.
+        save_index(
+            {
+                "list_id": 8678795,
+                "movies": {
+                    "1": {"id": 1, "title": "Parent"},
+                    "2": {"id": 2, "title": "Missing Two"},
+                },
+            }
         )
-
-        monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
-        monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
-
         run_franchise_gaps(_FakeClient())
 
         text = target.read_text(encoding="utf-8")
-        assert text.count("https://www.themoviedb.org/movie/2") == 1
-        assert "https://www.themoviedb.org/movie/3" in text
-
-    def test_export_skips_when_user_declines(self, gaps_fixture, tmp_path, monkeypatch):
-        """If the user declines the export prompt, the file is not created."""
-        from main import run_franchise_gaps
-
-        target = tmp_path / "franchise_gaps_urls.txt"
-
-        monkeypatch.setattr("builtins.input", lambda prompt="": str(target))
-        monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: False)
-
-        run_franchise_gaps(_FakeClient())
-
-        assert not target.exists()
+        assert "movie/2" not in text
+        assert "movie/3" in text
+        # Film 3 was already shown in the first run, so nothing is new.
+        assert "0 new, 1 previously shown" in text

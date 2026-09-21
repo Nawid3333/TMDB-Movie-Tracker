@@ -1,7 +1,6 @@
 """Tests for src.gaps."""
 
 import time
-from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -117,6 +116,177 @@ class TestFindGaps:
         )
         gaps = find_gaps()
         assert len(gaps["connected_tv"]) == 0
+
+    def test_first_run_flags_everything_new(self, tmp_project) -> None:
+        """With no prior report, every found gap is marked as new."""
+        save_index({"list_id": 8678795, "movies": {"1": {"id": 1, "title": "A"}}})
+        save_details(
+            {
+                "movies": {
+                    "1": {
+                        "id": 1,
+                        "collection": {
+                            "id": 10,
+                            "name": "Franchise",
+                            "parts": [
+                                {"id": 1, "title": "A", "release_date": "2020-01-01"},
+                                {"id": 2, "title": "Missing", "release_date": "2021-01-01"},
+                            ],
+                        },
+                        "keywords": [],
+                    }
+                }
+            }
+        )
+        gaps = find_gaps()
+        assert gaps["missing_films"][0]["is_new"] is True
+        assert gaps["shown_films"] == [2]
+
+    def test_second_run_flags_repeat_as_shown(self, tmp_project) -> None:
+        """A gap reported before is no longer new, and stays listed."""
+        save_index({"list_id": 8678795, "movies": {"1": {"id": 1, "title": "A"}}})
+        save_details(
+            {
+                "movies": {
+                    "1": {
+                        "id": 1,
+                        "collection": {
+                            "id": 10,
+                            "name": "Franchise",
+                            "parts": [
+                                {"id": 1, "title": "A", "release_date": "2020-01-01"},
+                                {"id": 2, "title": "Missing", "release_date": "2021-01-01"},
+                            ],
+                        },
+                        "keywords": [],
+                    }
+                }
+            }
+        )
+        first = find_gaps()
+        assert first["missing_films"][0]["is_new"] is True
+
+        second = find_gaps()
+        assert second["missing_films"][0]["is_new"] is False
+        # Still listed -- shown, not hidden.
+        assert len(second["missing_films"]) == 1
+
+    def test_shown_state_persists_across_runs(self, tmp_project) -> None:
+        """The shown-set survives a fresh process because it lives in GAPS_FILE."""
+        save_index({"list_id": 8678795, "movies": {"1": {"id": 1, "title": "A"}}})
+        save_details(
+            {
+                "movies": {
+                    "1": {
+                        "id": 1,
+                        "collection": {
+                            "id": 10,
+                            "name": "Franchise",
+                            "parts": [
+                                {"id": 1, "title": "A", "release_date": "2020-01-01"},
+                                {"id": 2, "title": "Missing", "release_date": "2021-01-01"},
+                            ],
+                        },
+                        "keywords": [],
+                    }
+                }
+            }
+        )
+        find_gaps()
+
+        loaded = load_gaps()
+        assert loaded["shown_films"] == [2]
+
+        again = find_gaps()
+        assert again["missing_films"][0]["is_new"] is False
+
+    def test_indexed_gap_film_not_marked_shown_forever(self, tmp_project) -> None:
+        """Shown-sets track only current gaps; indexed films drop out entirely."""
+        save_index({"list_id": 8678795, "movies": {"1": {"id": 1, "title": "A"}}})
+        details_payload = {
+            "movies": {
+                "1": {
+                    "id": 1,
+                    "collection": {
+                        "id": 10,
+                        "name": "Franchise",
+                        "parts": [
+                            {"id": 1, "title": "A", "release_date": "2020-01-01"},
+                            {"id": 2, "title": "Missing", "release_date": "2021-01-01"},
+                            {"id": 3, "title": "Missing Too", "release_date": "2022-01-01"},
+                        ],
+                    },
+                    "keywords": [],
+                }
+            }
+        }
+        save_details(details_payload)
+        first = find_gaps()
+        assert [f["id"] for f in first["missing_films"]] == [2, 3]
+
+        # The user indexes film 2; film 3 stays missing.
+        save_index(
+            {
+                "list_id": 8678795,
+                "movies": {
+                    "1": {"id": 1, "title": "A"},
+                    "2": {"id": 2, "title": "Missing"},
+                },
+            }
+        )
+        second = find_gaps()
+        assert [f["id"] for f in second["missing_films"]] == [3]
+        # Film 3 was shown before, film 2 is gone from the shown-set.
+        assert second["shown_films"] == [3]
+        assert second["missing_films"][0]["is_new"] is False
+
+    def test_new_gap_appears_alongside_shown_ones(self, tmp_project) -> None:
+        """A newly discovered film is flagged new while older ones stay shown."""
+        save_index({"list_id": 8678795, "movies": {"1": {"id": 1, "title": "A"}}})
+        save_details(
+            {
+                "movies": {
+                    "1": {
+                        "id": 1,
+                        "collection": {
+                            "id": 10,
+                            "name": "Franchise",
+                            "parts": [
+                                {"id": 1, "title": "A", "release_date": "2020-01-01"},
+                                {"id": 2, "title": "Missing", "release_date": "2021-01-01"},
+                            ],
+                        },
+                        "keywords": [],
+                    }
+                }
+            }
+        )
+        find_gaps()
+
+        # TMDB gains a new franchise entry between runs.
+        save_details(
+            {
+                "movies": {
+                    "1": {
+                        "id": 1,
+                        "collection": {
+                            "id": 10,
+                            "name": "Franchise",
+                            "parts": [
+                                {"id": 1, "title": "A", "release_date": "2020-01-01"},
+                                {"id": 2, "title": "Missing", "release_date": "2021-01-01"},
+                                {"id": 4, "title": "Brand New", "release_date": "2026-01-01"},
+                            ],
+                        },
+                        "keywords": [],
+                    }
+                }
+            }
+        )
+        gaps = find_gaps()
+        by_id = {f["id"]: f for f in gaps["missing_films"]}
+        assert by_id[2]["is_new"] is False
+        assert by_id[4]["is_new"] is True
 
     def test_missing_films_deduped(self, tmp_project) -> None:
         """A collection part referenced by multiple indexed movies is reported once."""
@@ -312,7 +482,7 @@ class TestGapBenchmarks:
 
 
 class TestLoadGapsFreshness:
-    """Coverage for load_gaps() and the freshness heuristic in main.py."""
+    """Coverage for load_gaps() used by the shown-state tracking in find_gaps."""
 
     def test_load_gaps_returns_persisted_report(self, tmp_project) -> None:
         """load_gaps() should read back a report written by find_gaps()."""
@@ -350,23 +520,3 @@ class TestLoadGapsFreshness:
     def test_load_gaps_missing_file_returns_empty(self, tmp_project) -> None:
         """load_gaps() should return an empty dict when no report exists."""
         assert load_gaps() == {}
-
-    def test_gaps_report_fresh_within_ceiling(self) -> None:
-        """A report generated now is considered fresh."""
-        from main import _gaps_report_fresh
-
-        now = datetime.now(UTC).isoformat()
-        assert _gaps_report_fresh(now) is True
-
-    def test_gaps_report_stale_after_window(self) -> None:
-        """A report older than the freshness window is stale."""
-        from main import _gaps_report_fresh
-
-        stale = (datetime.now(UTC) - timedelta(minutes=6)).isoformat()
-        assert _gaps_report_fresh(stale) is False
-
-    def test_gaps_report_invalid_timestamp_is_stale(self) -> None:
-        """Malformed timestamps are treated as not fresh."""
-        from main import _gaps_report_fresh
-
-        assert _gaps_report_fresh("not-a-date") is False
