@@ -32,7 +32,7 @@ from src.search import (
 )
 from src.tmdb_api import TMDBClient, _TMDBClientLike
 from src.ui import prompts, reports, term
-from src.ui.reports import title_line
+from src.ui.reports import title_line, title_link, title_link_rows
 from src.ui.term import cinput as input
 from src.ui.term import cprint as print
 
@@ -208,12 +208,12 @@ def run_fast_scan(client: TMDBClient) -> None:
 
     approve_additions = False
     if change_set.additions:
-        titles = [title_line(r) for r in change_set.additions.values()]
+        titles = title_link_rows(change_set.additions.values())
         approve_additions = prompts.confirm_category("Additions", titles, default=True)
 
     approve_removals = False
     if change_set.removals:
-        titles = [title_line(r) for r in change_set.removals.values()]
+        titles = title_link_rows(change_set.removals.values())
         approve_removals = prompts.confirm_category("Removals", titles, default=False)
 
     if not approve_additions and not approve_removals:
@@ -324,9 +324,11 @@ def _notify_non_movie_list_items(client: TMDBClient, items: list[dict]) -> None:
 
     print()
     print(term.warn(f"⚠ {len(non_movies)} non-movie item(s) found on the TMDB list (not counted above):"))
-    for entry in non_movies:
-        print(f"    - [{entry['media_type']}] {entry['title']}")
-        print(f"        {entry['url']}")
+    labels = [f"[{entry['media_type']}] {entry['title']}" for entry in non_movies]
+    width = max((term.display_width(label) for label in labels), default=0)
+    for entry, label in zip(non_movies, labels, strict=True):
+        pad = " " * max(width - term.display_width(label), 0)
+        print(f"    - {label}{pad} — {term.link(entry['url'], entry['url'])}")
 
     remote_list_id = _config.TMDB_LIST_ID
     if not remote_list_id or not client.session_id:
@@ -402,9 +404,8 @@ def _prompt_clean_vanished(
 
     print()
     print(term.warn(f"⚠ {len(missing_ids)} movie(s) in index but missing from the list:"))
-    for movie_id in missing_ids:
-        movie = local_movies.get(str(movie_id), {})
-        print(f"    - {title_line(movie)}")
+    for line in title_link_rows(local_movies.get(str(mid), {}) for mid in missing_ids):
+        print(f"    - {line}")
 
     bulk = input("\n" + term.danger("Delete all these vanished entries?") + term.dim(" (y/n): ")).strip().lower()
     if bulk == "y":
@@ -426,7 +427,7 @@ def _prompt_clean_vanished(
     removed = 0
     for movie_id in missing_ids:
         movie = local_movies.get(str(movie_id), {})
-        print(f"\n{title_line(movie)}")
+        print(f"\n{title_link(movie)}")
         print("  1. " + term.danger("Delete from local index"))
         print("  2. Rescrape / re-add to TMDB list")
         print("  3. Skip")
@@ -460,7 +461,7 @@ def _prompt_clean_vanished(
                 membership["remote_push"] = "rescraped"
             else:
                 failed += 1
-                print(f"  ⚠ Could not re-add {title_line(local_movies.get(str(movie_id), {}))}: {result}")
+                print(f"  ⚠ Could not re-add {title_link(local_movies.get(str(movie_id), {}))}: {result}")
         save_index(index)
         print(f"  Re-add result: {ok} ok, {failed} failed")
 
@@ -562,9 +563,9 @@ def _render_mismatch_summary(
         failed_adds = sorted(added_ids - live_ids)
         if failed_adds:
             print(term.warn(f"\n⚠ {len(failed_adds)} of the batch were not found on the list:"))
-            for movie_id in failed_adds:
-                movie = index.get("movies", {}).get(str(movie_id), {})
-                print(f"    - {title_line(movie)}")
+            movies = index.get("movies", {})
+            for line in title_link_rows(movies.get(str(mid), {}) for mid in failed_adds):
+                print(f"    - {line}")
         else:
             print(term.ok(f"\n✓ All {len(added_ids)} batch movie(s) confirmed on the list."))
 
@@ -722,8 +723,8 @@ def run_push_url_file_only(client: TMDBClient) -> None:
 
     if already_present:
         print(term.warn(f"⚠ {len(already_present)} movie(s) already on the list and will be skipped:"))
-        for record in already_present:
-            print(f"    - {title_line(record)}")
+        for line in title_link_rows(already_present):
+            print(f"    - {line}")
         if incomplete:
             print(term.warn("  (List fetch was incomplete; some already-present matches may have been missed.)"))
 
@@ -735,8 +736,8 @@ def run_push_url_file_only(client: TMDBClient) -> None:
 
     print()
     print(term.step(f"Found {len(to_push)} movie(s) to push:"))
-    for record in to_push:
-        print(f"  + {title_line(record)}")
+    for line in title_link_rows(to_push):
+        print(f"  + {line}")
 
     if not prompts.confirm(f"\nPush these {len(to_push)} movie(s) to remote list {remote_list_id}?", default=False):
         print("  → Cancelled")
@@ -797,9 +798,8 @@ def run_clean_vanished(client: TMDBClient) -> None:
 
     print()
     print(term.warn(f"⚠ {len(missing_ids)} movie(s) in index but missing from the list:"))
-    for movie_id in missing_ids:
-        movie = local_movies.get(str(movie_id), {})
-        print(f"    - {title_line(movie)}")
+    for line in title_link_rows(local_movies.get(str(mid), {}) for mid in missing_ids):
+        print(f"    - {line}")
 
     bulk = input("\n" + term.danger("Delete all these entries?") + term.dim(" (y/n): ")).strip().lower()
     if bulk == "y":
@@ -818,7 +818,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
     removed = 0
     for movie_id in missing_ids:
         movie = local_movies.get(str(movie_id), {})
-        print(f"\n{title_line(movie)}")
+        print(f"\n{title_link(movie)}")
         print("  1. " + term.danger("Delete from local index"))
         print("  2. Rescrape / re-add to TMDB list")
         print("  3. Skip")
@@ -852,7 +852,7 @@ def run_clean_vanished(client: TMDBClient) -> None:
                 membership["remote_push"] = "rescraped"
             else:
                 failed += 1
-                print(f"  ⚠ Could not re-add {title_line(local_movies.get(str(movie_id), {}))}: {result}")
+                print(f"  ⚠ Could not re-add {title_link(local_movies.get(str(movie_id), {}))}: {result}")
         save_index(index)
         print(f"  Re-add result: {ok} ok, {failed} failed")
 
@@ -946,7 +946,12 @@ def run_franchise_gaps(_client: _TMDBClientLike) -> None:
         print(f"    {'─' * idx_w}  {'─' * title_w}  {'─' * 40}")
         for i, item in enumerate(items, 1):
             label = title_line(item) + suffix
-            print(f"    {i:<{idx_w}}  {label:<{title_w}}  {_gap_url(item)}")
+            url = _gap_url(item)
+            # Padding is computed from the plain label -- the linked version
+            # below carries invisible OSC 8 bytes that would otherwise throw
+            # off Python's `{:<width}` character-counting alignment.
+            pad = " " * max(title_w - term.display_width(label), 0)
+            print(f"    {i:<{idx_w}}  {term.link(label, url)}{pad}  {url}")
 
     missing = gaps.get("missing_films", [])
     new_films = [m for m in missing if m.get("is_new")]

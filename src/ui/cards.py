@@ -1,6 +1,6 @@
 """Movie detail card rendering for the terminal."""
 
-from src.ui.reports import title_line
+from src.ui.reports import title_link
 from src.ui.term import cprint as print
 from src.ui.term import dim, step, wrap
 
@@ -15,7 +15,7 @@ def _pluralize(count: int, singular: str, plural: str | None = None) -> str:
 
 def render_detail_card(membership: dict, detail: dict) -> None:
     """Print a text detail card for a movie."""
-    lines = [step(title_line(membership))]
+    lines = [step(title_link(membership))]
 
     tagline = detail.get("tagline")
     if tagline:
@@ -65,11 +65,6 @@ def render_detail_card(membership: dict, detail: dict) -> None:
     if overview:
         lines.append("")
         lines.extend(wrap(overview))
-
-    movie_id = membership.get("id")
-    if movie_id:
-        lines.append("")
-        lines.append(f"https://www.themoviedb.org/movie/{movie_id}")
 
     for line in lines:
         print(line)

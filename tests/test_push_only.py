@@ -174,6 +174,51 @@ class TestPushUrlFileOnly:
         assert not route.called
 
     @respx.mock
+    def test_shows_title_as_clickable_link_before_confirm(self, tmp_path, tmp_project, client, monkeypatch, capsys):
+        """Each movie's title is shown as a clickable link to its TMDB page before the push confirmation."""
+        from main import run_push_url_file_only
+
+        source = tmp_path / "push_urls.txt"
+        source.write_text("550\n", encoding="utf-8")
+
+        respx.get("https://api.themoviedb.org/3/movie/550").mock(
+            return_value=httpx.Response(200, json={"id": 550, "title": "Fight Club", "release_date": "1999-10-15"})
+        )
+        respx.get("https://api.themoviedb.org/3/list/8678795").mock(
+            side_effect=lambda request: httpx.Response(
+                200,
+                json={"id": 8678795, "item_count": 0, "items": [], "total_pages": 1},
+            )
+        )
+        respx.post("https://api.themoviedb.org/3/list/8678795/add_item").mock(
+            side_effect=lambda request: httpx.Response(200, json={"status_code": 12})
+        )
+
+        confirmed_with: list[str] = []
+
+        def fake_confirm(prompt, default=False):
+            confirmed_with.append(prompt)
+            return True
+
+        monkeypatch.setattr("builtins.input", lambda prompt="": str(source))
+        monkeypatch.setattr("src.ui.prompts.confirm", fake_confirm)
+        monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
+        # Hyperlink escape codes only emit on a real terminal; force them on
+        # here so the OSC 8 sequence can actually be asserted on.
+        monkeypatch.setattr("src.ui.term._COLOR", True)
+
+        client.session_id = "fake_session"
+
+        run_push_url_file_only(client)
+
+        captured = capsys.readouterr()
+        # Title and year stay plain; the URL alongside them carries the OSC 8
+        # hyperlink to the movie's TMDB page -- no full detail dump.
+        url = "https://www.themoviedb.org/movie/550"
+        assert f"Fight Club (1999) — \x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\" in captured.out
+        assert confirmed_with, "expected the push confirmation to still be asked"
+
+    @respx.mock
     def test_skips_ids_already_on_live_list(self, tmp_path, tmp_project, client, monkeypatch, capsys):
         """Movies already present on the live list are skipped before pushing."""
         from main import run_push_url_file_only
@@ -208,6 +253,7 @@ class TestPushUrlFileOnly:
         monkeypatch.setattr("builtins.input", lambda prompt="": str(source))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
         monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
+        monkeypatch.setattr("src.ui.term._COLOR", True)
 
         client.session_id = "fake_session"
 
@@ -218,3 +264,8 @@ class TestPushUrlFileOnly:
         assert "Pushed 1 movie(s): 1 ok, 0 already present, 0 failed" in captured.out
         assert "1 already on the list were skipped before pushing" in captured.out
         assert route.call_count == 1
+        # Both the skipped and the pushed movie show a clickable link next to the title.
+        url_550 = "https://www.themoviedb.org/movie/550"
+        url_551 = "https://www.themoviedb.org/movie/551"
+        assert f"Fight Club — \x1b]8;;{url_550}\x1b\\{url_550}\x1b]8;;\x1b\\" in captured.out
+        assert f"The Crying Game — \x1b]8;;{url_551}\x1b\\{url_551}\x1b]8;;\x1b\\" in captured.out

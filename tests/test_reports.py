@@ -12,7 +12,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.changes import ChangeSet
-from src.ui.reports import _is_upcoming, render_change_report, title_line
+from src.ui import term
+from src.ui.reports import _is_upcoming, movie_url, render_change_report, title_line, title_link, title_link_rows
 
 
 def _movie(movie_id: int, title: str, release: str = "1999-03-31") -> dict:
@@ -71,6 +72,52 @@ class TestTitleLine:
         assert "(upcoming)" not in title_line(_movie(1, "The Matrix"), show_upcoming=True)
 
 
+class TestMovieUrl:
+    def test_builds_the_tmdb_movie_page_url(self):
+        assert movie_url(603) == "https://www.themoviedb.org/movie/603"
+
+
+class TestTitleLink:
+    def test_the_url_is_always_visible_plain_text_when_colour_is_off(self):
+        """The default (non-tty) case: the URL is still shown, just not as a hyperlink."""
+        out = title_link(_movie(603, "The Matrix"))
+        assert out == "The Matrix (1999) — https://www.themoviedb.org/movie/603"
+
+    def test_the_url_becomes_an_osc8_hyperlink_when_colour_is_on(self, monkeypatch):
+        monkeypatch.setattr(term, "_COLOR", True)
+        out = title_link(_movie(603, "The Matrix"))
+        url = "https://www.themoviedb.org/movie/603"
+        assert out == f"The Matrix (1999) — \x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\"
+
+    def test_falls_back_to_plain_title_when_there_is_no_id_to_link_to(self, monkeypatch):
+        monkeypatch.setattr(term, "_COLOR", True)
+        assert title_link({"title": "Untitled Project"}) == "Untitled Project"
+
+
+class TestTitleLinkRows:
+    def test_short_titles_are_padded_to_match_the_longest_in_the_batch(self):
+        rows = title_link_rows(
+            [
+                _movie(1, "Cat"),
+                _movie(2, "A Much Longer Title"),
+            ]
+        )
+        dash_positions = [row.index("—") for row in rows]
+        assert dash_positions[0] == dash_positions[1]
+
+    def test_a_single_record_needs_no_padding(self):
+        """A one-item batch is identical to the plain title_link output."""
+        record = _movie(603, "The Matrix")
+        assert title_link_rows([record]) == [title_link(record)]
+
+    def test_a_record_with_no_id_is_left_unpadded_and_unlinked(self):
+        rows = title_link_rows([{"title": "Untitled"}, _movie(2, "Longer Title")])
+        assert rows[0] == "Untitled"
+
+    def test_an_empty_batch_returns_an_empty_list(self):
+        assert title_link_rows([]) == []
+
+
 class TestRenderChangeReport:
     def test_the_counts_are_always_reported(self):
         out = _rendered(ChangeSet(current_count=10, proposed_count=12))
@@ -85,6 +132,18 @@ class TestRenderChangeReport:
         out = _rendered(cs)
         assert "Additions: 1" in out
         assert "+ The Matrix (1999)" in out
+
+    def test_additions_and_removals_are_clickable_links_on_a_real_terminal(self, monkeypatch):
+        monkeypatch.setattr(term, "_COLOR", True)
+        cs = ChangeSet(
+            additions={"603": _movie(603, "The Matrix")},
+            removals={"550": _movie(550, "Fight Club")},
+        )
+        out = _rendered(cs)
+        url_603 = "https://www.themoviedb.org/movie/603"
+        url_550 = "https://www.themoviedb.org/movie/550"
+        assert f"The Matrix (1999) — \x1b]8;;{url_603}\x1b\\{url_603}\x1b]8;;\x1b\\" in out
+        assert f"Fight Club (1999) — \x1b]8;;{url_550}\x1b\\{url_550}\x1b]8;;\x1b\\" in out
 
     def test_removals_are_listed_with_a_minus(self):
         cs = ChangeSet(removals={"550": _movie(550, "Fight Club")})

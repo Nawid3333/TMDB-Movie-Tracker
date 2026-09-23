@@ -207,6 +207,18 @@ def dim(text: str) -> str:
     return style(text, Style.DIM)
 
 
+def link(text: str, url: str) -> str:
+    """Render `text` as an OSC 8 hyperlink that opens `url` when clicked.
+
+    Falls back to plain text when colour is off (dumb terminal, NO_COLOR, or
+    output piped to a file) since the escape codes would otherwise show up as
+    literal garbage in a place that can't render them.
+    """
+    if not _COLOR or not text:
+        return text
+    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
+
+
 def bold(text: str) -> str:
     """Emphasis with no colour meaning: a label, a count, a name in a list."""
     return style(text, Style.BOLD)

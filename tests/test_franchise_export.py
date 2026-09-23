@@ -109,6 +109,23 @@ class TestFranchiseGapsExport:
         assert "https://www.themoviedb.org/movie/2  # Missing Two (2021)" in text
         assert "https://www.themoviedb.org/movie/3  # Missing Three (2022)" in text
 
+    def test_gap_table_titles_are_clickable_links_on_a_real_terminal(
+        self, gaps_fixture, tmp_project, monkeypatch, capsys
+    ):
+        """The terminal table's title column links to the same URL as its Link column."""
+        import main
+        from main import run_franchise_gaps
+
+        monkeypatch.setattr(main.term, "_COLOR", True)
+
+        run_franchise_gaps(_FakeClient())
+
+        printed = capsys.readouterr().out
+        url = "https://www.themoviedb.org/movie/2"
+        assert f"\x1b]8;;{url}\x1b\\Missing Two (2021)\x1b]8;;\x1b\\" in printed
+        # The plain-text Link column stays alongside it as a fallback.
+        assert url in printed
+
     def test_indexed_films_leave_the_report(self, gaps_fixture, tmp_project):
         """Adding a gap film to the index removes it from the next report."""
         import config.config as _config

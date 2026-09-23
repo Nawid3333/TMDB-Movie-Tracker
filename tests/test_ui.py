@@ -327,3 +327,12 @@ class TestRenderDetailCard:
         with captured() as out:
             render_detail_card({"id": 1, "title": "X", "collection": {"name": "From Membership"}}, {})
         assert "From Membership" in out.getvalue()
+
+    def test_the_heading_shows_title_and_a_clickable_url_on_a_real_terminal(self, monkeypatch):
+        """The heading is 'Title — URL', with the URL itself carrying an OSC 8 hyperlink."""
+        monkeypatch.setattr(term, "_COLOR", True)
+        with captured() as out:
+            render_detail_card({"id": 27205, "title": "Inception"}, {})
+        printed = out.getvalue()
+        url = "https://www.themoviedb.org/movie/27205"
+        assert f"Inception — \x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\" in printed

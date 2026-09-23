@@ -151,6 +151,18 @@ class TestNotifyNonMovieListItems:
         assert "Cape Fear" in printed
         assert "https://www.themoviedb.org/tv/277439" in printed
 
+    def test_the_title_and_link_are_clickable_on_a_real_terminal(self, monkeypatch, capsys):
+        client = SimpleNamespace(session_id="s")
+        monkeypatch.setattr(main._config, "TMDB_LIST_ID", "8678795")
+        monkeypatch.setattr(main.prompts, "confirm", lambda *a, **k: False)
+        monkeypatch.setattr(main.term, "_COLOR", True)
+
+        main._notify_non_movie_list_items(client, [{"media_type": "tv", "id": 277439, "name": "Cape Fear"}])
+
+        printed = capsys.readouterr().out
+        url = "https://www.themoviedb.org/tv/277439"
+        assert f"Cape Fear — \x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\" in printed
+
     def test_without_either_v4_credential_it_points_at_the_link_instead_of_prompting(self, monkeypatch, capsys):
         """Removing a non-movie item needs the v4 API. With neither the final
         access token nor the read-access token needed to go get one, offering

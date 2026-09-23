@@ -22,7 +22,7 @@ from src.atomic_io import atomic_write_json
 from src.index import ensure_record_exists, load_details, load_index, now_iso, save_details, save_index
 from src.posters import download_poster
 from src.tmdb_api import TMDBClient, pick_certification
-from src.ui.reports import title_line
+from src.ui.reports import title_link
 from src.ui.term import cprint as print
 
 logger = logging.getLogger(__name__)
@@ -481,7 +481,7 @@ def run_full_scan(
                         last_checkpoint = now
                     # _enrich_one mutates `membership` in place, so the title is
                     # only reliable to read *after* future.result() returns.
-                    label = title_line(membership) if membership.get("title") else f"#{movie_id}"
+                    label = title_link(membership) if membership.get("title") else f"#{movie_id}"
                     if membership.get("gone"):
                         gone.append(label)
                         print(f"  ⚠ {label} — no longer on TMDB, marked gone")
@@ -495,7 +495,7 @@ def run_full_scan(
                     logger.debug("Enriched %s", movie_id)
                 except Exception as exc:
                     logger.error("Failed to enrich %s: %s", movie_id, exc)
-                    label = title_line(membership) if membership.get("title") else f"#{movie_id}"
+                    label = title_link(membership) if membership.get("title") else f"#{movie_id}"
                     failed.append(label)
                     print(f"  ✗ {label} — {exc}")
                     # Do not add to checkpoint so resume can retry this movie.
