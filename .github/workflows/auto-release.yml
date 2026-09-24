@@ -1,12 +1,12 @@
 # Bumps the version and cuts a release automatically, driven by Conventional
 # Commits, but only after the CI workflow (lint, format, type check, tests)
 # has passed on that exact commit -- ci.yml and this workflow used to both
-# trigger independently on `push: branches: [master]`, which meant a broken
+# trigger independently on `push: branches: [main]`, which meant a broken
 # commit could get auto-tagged and released before, or even if, CI failed.
 # Triggering on `workflow_run: ["CI"]` instead makes this wait for that run
 # to finish, and the job condition below restricts it to a *successful* CI
-# run that was itself triggered by a push to master (not a pull_request run).
-# Checks out `head_branch` (master), not `head_sha`: python-semantic-release
+# run that was itself triggered by a push to main (not a pull_request run).
+# Checks out `head_branch` (main), not `head_sha`: python-semantic-release
 # refuses to release from a detached HEAD ("cannot match any release
 # groups"), which checking out a bare SHA produces. workflow_run fires
 # right after CI completes, so in practice this is still the commit CI
@@ -44,7 +44,7 @@ jobs:
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'master'
+      github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

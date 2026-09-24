@@ -1,20 +1,20 @@
 # Runs the test suite on every push and pull request. release.yml runs the same
 # suite, but only once a release is published -- by then a broken commit is
-# already on master and tagged. This is the same check, moved earlier.
+# already on main and tagged. This is the same check, moved earlier.
 name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
+    branches: [main]
   # Runnable by hand from the Actions tab on any branch, e.g. to check a
-  # feature branch before opening a PR. Only a push to master can lead to a
+  # feature branch before opening a PR. Only a push to main can lead to a
   # release: auto-release.yml checks the triggering event.
   workflow_dispatch:
 
 # A newer push to the same branch or PR makes the older run pointless, so it
-# is cancelled instead of finishing on a Windows runner. On master that is
+# is cancelled instead of finishing on a Windows runner. On main that is
 # safe for releases too: auto-release.yml skips the cancelled run, and the run
 # for the newer commit releases every commit since the last tag.
 concurrency:

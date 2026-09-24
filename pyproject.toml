@@ -27,11 +27,11 @@ include = ["config*", "src*", "src.ui*"]
 # ==================== RELEASE AUTOMATION ====================
 # Version is bumped automatically by python-semantic-release, driven by
 # Conventional Commits (feat:/fix:/BREAKING CHANGE) on every push to
-# master -- see .github/workflows/auto-release.yml. Don't bump `version`
+# main -- see .github/workflows/auto-release.yml. Don't bump `version`
 # above by hand; the next automated run will just move it again.
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
-branch = "master"
+branch = "main"
 # [skip ci]: this commit only changes the version line, and CI already passed
 # on the commit being released. Without it the bump re-ran the whole Windows
 # suite, and then auto-release.yml again, only to find nothing to release.
