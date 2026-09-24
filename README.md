@@ -214,6 +214,23 @@ python -m ruff check .
 python -m ruff format --check .
 ```
 
+### Monthly site check
+
+`.github/workflows/site-check.yml` runs `tests/site_check.py` on the 3rd of
+every month. It checks the live TMDB API for the movie fields the enrichment
+stores, certifications, collections, the poster CDN and, with `TMDB_LIST_ID`,
+your list. If one of them would fail, it opens an issue labelled
+`site-check`, and the first passing run closes it again. Run it yourself any
+time:
+
+```bash
+python tests/site_check.py
+```
+
+It needs `TMDB_API_KEY` (from your `.env` locally, or as a repository secret
+for the workflow) and skips every check without it. It only reads, and its
+report never includes the key.
+
 ---
 
 ## Configuration tunables
