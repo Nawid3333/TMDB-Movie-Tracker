@@ -98,11 +98,16 @@ def _find_missing_collection_parts(
 
 def _find_connected_tv(
     details: dict,
-    indexed_ids: set[int],
     keyword_counts: Counter,
     collection_tokens: set[frozenset[str]],
 ) -> list[dict]:
-    """Return connected TV series that pass the keyword franchise filter."""
+    """Return connected TV series that pass the keyword franchise filter.
+
+    Not filtered against the index: the index is movie-only, and TMDB numbers
+    TV series and movies from separate sequences. Checking a TV id against the
+    indexed movie ids hid any series whose id happened to equal an indexed
+    film's.
+    """
     tv: list[dict] = []
     seen_tv: set[int] = set()
     for detail in details.get("movies", {}).values():
@@ -114,7 +119,7 @@ def _find_connected_tv(
             if not tv_id or not via:
                 continue
             tv_id_int = int(tv_id)
-            if tv_id_int in seen_tv or tv_id_int in indexed_ids:
+            if tv_id_int in seen_tv:
                 continue
             if not _keyword_qualifies(via, keyword_counts, collection_tokens):
                 continue
@@ -169,7 +174,7 @@ def find_gaps(*, persist: bool = True) -> dict:
 
     seen_ids: set[int] = set()
     missing_films = _find_missing_collection_parts(index, details, indexed_ids, seen_ids)
-    connected_tv = _find_connected_tv(details, indexed_ids, keyword_counts, collection_tokens)
+    connected_tv = _find_connected_tv(details, keyword_counts, collection_tokens)
 
     missing_films.sort(key=lambda x: (x.get("release_date") or "", x.get("title", "")))
     connected_tv.sort(key=lambda x: (x.get("first_air_date") or "", x.get("name", "")))

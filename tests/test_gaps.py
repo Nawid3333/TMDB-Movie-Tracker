@@ -85,14 +85,20 @@ class TestFindGaps:
         gaps = find_gaps()
         assert gaps["indexed_count"] == 2
 
-    def test_keyword_tv_indexed_not_duplicated(self, tmp_project) -> None:
-        """TV ids already in the index must not be reported again."""
+    def test_tv_id_equal_to_an_indexed_movie_id_is_still_reported(self, tmp_project) -> None:
+        """TMDB numbers TV series and movies separately; the index is movie-only.
+
+        TV series 100 and movie 100 are unrelated titles, so indexing the
+        movie must not hide the series. This used to be asserted the other way
+        round, and passed only because the keyword never reached the
+        franchise threshold.
+        """
         save_index(
             {
                 "list_id": 8678795,
                 "movies": {
                     "1": {"id": 1, "title": "A"},
-                    "100": {"id": 100, "title": "Already Here"},
+                    "100": {"id": 100, "title": "Unrelated Film"},
                 },
             }
         )
@@ -105,17 +111,18 @@ class TestFindGaps:
                         "connected_tv": [
                             {
                                 "id": 100,
-                                "name": "Already Here",
+                                "name": "Some Series",
                                 "first_air_date": "2020-01-01",
                                 "via_keyword": "Shared Name",
                             }
                         ],
                     },
+                    "100": {"id": 100, "keywords": ["Shared Name"]},
                 }
             }
         )
         gaps = find_gaps()
-        assert len(gaps["connected_tv"]) == 0
+        assert [show["name"] for show in gaps["connected_tv"]] == ["Some Series"]
 
     def test_first_run_flags_everything_new(self, tmp_project) -> None:
         """With no prior report, every found gap is marked as new."""

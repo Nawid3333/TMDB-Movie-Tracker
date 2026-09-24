@@ -264,7 +264,7 @@ def run_fast_scan(client: TMDBClient) -> None:
     _render_mismatch_summary(index, items, set())
 
     # Backend vanished cleanup: prompt when local movies are missing from the live list.
-    _prompt_clean_vanished(client, items, index)
+    _prompt_clean_vanished(client, items, index, incomplete=incomplete)
 
 
 def _movie_only_ids(items: list[dict]) -> set[int]:
@@ -287,7 +287,9 @@ def _non_movie_items(items: list[dict]) -> list[dict]:
     media type, e.g. /tv/{id}) rather than a /movie/{id} guess, so it can be
     opened and verified before anything is removed.
     """
-    seen: set[int] = set()
+    # Keyed by type and id: each media type has its own id sequence, so a TV
+    # show and a person with the same number are two different items.
+    seen: set[tuple[str | None, int]] = set()
     out: list[dict] = []
     for item in items:
         media_type = item.get("media_type")
@@ -295,9 +297,9 @@ def _non_movie_items(items: list[dict]) -> list[dict]:
         if media_type == "movie" or not movie_id:
             continue
         movie_id = int(movie_id)
-        if movie_id in seen:
+        if (media_type, movie_id) in seen:
             continue
-        seen.add(movie_id)
+        seen.add((media_type, movie_id))
         out.append(
             {
                 "id": movie_id,
@@ -382,12 +384,23 @@ def _notify_non_movie_list_items(client: TMDBClient, items: list[dict]) -> None:
         print(term.warn(f"  {failed} item(s) could not be removed."))
 
 
+def _vanished_ids(index: dict, items: list[dict]) -> list[int]:
+    """Ids of indexed movies that are not on the fetched list."""
+    return sorted({int(mid) for mid in index.get("movies", {})} - _movie_only_ids(items))
+
+
 def _prompt_clean_vanished(
     client: TMDBClient,
     items: list[dict],
     index: dict | None = None,
+    *,
+    incomplete: bool = False,
 ) -> None:
-    """Detect index movies missing from the live list and ask to delete or rescrape."""
+    """Detect index movies missing from the live list and ask to delete or rescrape.
+
+    Nothing is offered when the fetch was incomplete: a movie on a page that
+    failed to load looks exactly like one that left the list.
+    """
     remote_list_id = _config.TMDB_LIST_ID
     if not remote_list_id:
         return
@@ -395,11 +408,15 @@ def _prompt_clean_vanished(
     if index is None:
         index = load_index()
     local_movies = index.get("movies", {})
-    live_ids = _movie_only_ids(items)
-    local_ids = {int(mid) for mid in local_movies}
-    missing_ids = sorted(local_ids - live_ids)
+    missing_ids = _vanished_ids(index, items)
 
     if not missing_ids:
+        return
+
+    if incomplete:
+        print()
+        print(term.warn(f"⚠ {len(missing_ids)} movie(s) look missing, but the list fetch was incomplete."))
+        print("    Vanished cleanup is skipped until a complete fetch succeeds.")
         return
 
     print()
@@ -787,77 +804,10 @@ def run_clean_vanished(client: TMDBClient) -> None:
     _notify_non_movie_list_items(client, items)
 
     index = load_index()
-    local_movies = index.get("movies", {})
-    live_ids = _movie_only_ids(items)
-    local_ids = {int(mid) for mid in local_movies}
-    missing_ids = sorted(local_ids - live_ids)
-
-    if not missing_ids:
+    if not _vanished_ids(index, items):
         print(term.ok("\n✓ No vanished entries. Every local movie is still on the list."))
         return
-
-    print()
-    print(term.warn(f"⚠ {len(missing_ids)} movie(s) in index but missing from the list:"))
-    for line in title_link_rows(local_movies.get(str(mid), {}) for mid in missing_ids):
-        print(f"    - {line}")
-
-    bulk = input("\n" + term.danger("Delete all these entries?") + term.dim(" (y/n): ")).strip().lower()
-    if bulk == "y":
-        removed = 0
-        for movie_id in missing_ids:
-            key = str(movie_id)
-            if key in local_movies:
-                del local_movies[key]
-                removed += 1
-        index["movies"] = local_movies
-        save_index(index)
-        print(term.ok(f"\n✓ Removed {removed} vanished movie(s) from the index."))
-        return
-
-    rescrape_ids: list[int] = []
-    removed = 0
-    for movie_id in missing_ids:
-        movie = local_movies.get(str(movie_id), {})
-        print(f"\n{title_link(movie)}")
-        print("  1. " + term.danger("Delete from local index"))
-        print("  2. Rescrape / re-add to TMDB list")
-        print("  3. Skip")
-        choice = input("Choice (1/2/3): ").strip()
-        if choice == "1":
-            local_movies.pop(str(movie_id), None)
-            removed += 1
-        elif choice == "2":
-            rescrape_ids.append(movie_id)
-        else:
-            print("  → Skipped")
-
-    if removed:
-        index["movies"] = local_movies
-        save_index(index)
-        print(term.ok(f"\n✓ Removed {removed} movie(s) from the index."))
-
-    if rescrape_ids:
-        if not client.session_id:
-            print("\n" + term.danger("✗ No TMDB session; cannot re-add movies to the list."))
-            return
-        print()
-        print(f"  Re-adding {len(rescrape_ids)} movie(s) to TMDB list {remote_list_id}...")
-        ok = 0
-        failed = 0
-        for movie_id in rescrape_ids:
-            result = push_to_tmdb_list(client, remote_list_id, movie_id)
-            if result["success"]:
-                ok += 1
-                membership = local_movies.get(str(movie_id), {})
-                membership["remote_push"] = "rescraped"
-            else:
-                failed += 1
-                print(f"  ⚠ Could not re-add {title_link(local_movies.get(str(movie_id), {}))}: {result}")
-        save_index(index)
-        print(f"  Re-add result: {ok} ok, {failed} failed")
-
-        if prompts.confirm("\nVerify against the live TMDB list now?", default=True):
-            _fetch_and_summarize_mismatches(client, added_ids=set(rescrape_ids))
+    _prompt_clean_vanished(client, items, index, incomplete=incomplete)
 
 
 def _gap_url(item: dict) -> str:

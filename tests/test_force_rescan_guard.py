@@ -7,10 +7,12 @@ confirms first, and a refusal must not reach the enrichment call at all.
 """
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 import main
+from src.tmdb_api import TMDBClient
 
 
 @pytest.fixture
@@ -25,7 +27,7 @@ class TestForceRescanConfirms:
         monkeypatch.setattr(main, "enrich_run_full_scan", lambda *a, **k: started.append(k))
         monkeypatch.setattr(main.prompts, "confirm", lambda *a, **k: False)
 
-        main.run_force_full_scan(object())
+        main.run_force_full_scan(cast(TMDBClient, object()))
 
         assert started == []
         assert "Cancelled" in capsys.readouterr().out
@@ -35,7 +37,7 @@ class TestForceRescanConfirms:
         monkeypatch.setattr(main, "enrich_run_full_scan", lambda *a, **k: started.append(k))
         monkeypatch.setattr(main.prompts, "confirm", lambda *a, **k: True)
 
-        main.run_force_full_scan(object())
+        main.run_force_full_scan(cast(TMDBClient, object()))
 
         assert len(started) == 1
         assert started[0]["force"] is True
@@ -46,7 +48,7 @@ class TestForceRescanConfirms:
         monkeypatch.setattr(main, "enrich_run_full_scan", lambda *a, **k: None)
         monkeypatch.setattr(main.prompts, "confirm", lambda *a, **k: False)
 
-        main.run_force_full_scan(object())
+        main.run_force_full_scan(cast(TMDBClient, object()))
 
         assert "all 3 movie(s)" in capsys.readouterr().out
 
@@ -61,6 +63,6 @@ class TestForceRescanConfirms:
         monkeypatch.setattr(main, "enrich_run_full_scan", lambda *a, **k: pytest.fail("should not run"))
         monkeypatch.setattr(main.prompts, "confirm", _confirm)
 
-        main.run_force_full_scan(object())
+        main.run_force_full_scan(cast(TMDBClient, object()))
 
         assert seen["default"] is False
