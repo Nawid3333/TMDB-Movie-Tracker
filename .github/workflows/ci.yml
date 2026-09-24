@@ -42,7 +42,7 @@ jobs:
           # The floor declared in requires-python, as in release.yml: testing
           # the oldest supported version is what catches a newer-only API
           # slipping in.
-          python-version: "3.11"
+          python-version: '3.11'
           cache: pip
 
       - name: Install
