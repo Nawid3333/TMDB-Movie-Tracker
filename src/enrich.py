@@ -78,13 +78,19 @@ def _should_enrich(record: dict, details: dict, force: bool = False) -> bool:
     if tier in ("hot", "warm"):
         return True
     enriched_at = details.get("enriched_at", "")
-    if not enriched_at:
+    if not enriched_at or not isinstance(enriched_at, str):
         return True
     try:
         enriched = datetime.fromisoformat(enriched_at.replace("Z", "+00:00"))
-        days = (datetime.now(UTC) - enriched).days
     except ValueError:
         return True
+    if enriched.tzinfo is None:
+        # Everything this program writes carries a zone, but one stamp without
+        # it -- hand-edited, or from an older build -- made the subtraction
+        # below raise TypeError, which ValueError does not catch, and that
+        # aborted the whole enrichment run over one record.
+        enriched = enriched.replace(tzinfo=UTC)
+    days = (datetime.now(UTC) - enriched).days
     if tier == "cool":
         return days >= 7
     if tier == "cold":

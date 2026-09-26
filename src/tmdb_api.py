@@ -15,7 +15,6 @@ from config.config import (
     TMDB_API_BASE_URL,
     TMDB_API_BASE_URL_V4,
     TMDB_DETAIL_WORKERS,
-    TMDB_FALLBACK_REGION,
     TMDB_HTTP_TIMEOUT,
     TMDB_LIST_PAGE_WORKERS,
     TMDB_MAX_CONNECTIONS,
@@ -429,12 +428,16 @@ class TMDBClient:
 def pick_certification(
     release_dates: list[dict],
     origin_country: str | None,
-    fallback: str = TMDB_FALLBACK_REGION,
+    fallback: str | None = None,
 ) -> dict | None:
     """Select the best certification from release_dates for a film.
 
-    Priority: country of origin, then configured fallback region.
+    Priority: country of origin, then the fallback region -- by default the
+    configured TMDB_FALLBACK_REGION, read now rather than at import so a test
+    can pin it instead of inheriting whatever the developer's .env says.
     """
+    if fallback is None:
+        fallback = _config.TMDB_FALLBACK_REGION
     if not release_dates or not isinstance(release_dates, list):
         return None
     by_country: dict[str, list[dict]] = {}

@@ -59,6 +59,17 @@ def _all_fixtures() -> dict[str, dict]:
     }
 
 
+@pytest.fixture(autouse=True)
+def _template_fallback_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test with the shipped certification fallback region.
+
+    config.py reads the developer's own .env at import, so a local
+    TMDB_FALLBACK_REGION=en turned every certification fixture that relies on
+    the DE fallback into a failure -- on that machine only, never in CI.
+    """
+    monkeypatch.setattr("config.config.TMDB_FALLBACK_REGION", "DE")
+
+
 @pytest.fixture
 def tmp_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect data/logs dirs to a temp path so tests never touch real files."""

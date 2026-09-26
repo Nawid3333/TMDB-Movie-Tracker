@@ -58,6 +58,16 @@ class TestShouldEnrich:
         details = {"enriched_at": "2020-01-01T00:00:00Z"}
         assert _should_enrich({"status": "Released", "release_date": "2010-01-01"}, details) is True
 
+    def test_a_timestamp_without_a_zone_is_read_as_utc(self) -> None:
+        # Used to raise TypeError (naive minus aware), aborting the whole run.
+        cold = {"status": "Released", "release_date": "2010-01-01"}
+        assert _should_enrich(cold, {"enriched_at": "2020-01-01T00:00:00"}) is True
+        recent = datetime.now(UTC).replace(tzinfo=None).isoformat()
+        assert _should_enrich(cold, {"enriched_at": recent}) is False
+
+    def test_a_non_string_timestamp_means_enrich_again(self) -> None:
+        assert _should_enrich({"status": "Released", "release_date": "2010-01-01"}, {"enriched_at": 1700000000}) is True
+
 
 class TestFetchCollection:
     @respx.mock

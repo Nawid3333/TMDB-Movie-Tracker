@@ -136,7 +136,11 @@ TMDB_PASSWORD = os.getenv("TMDB_PASSWORD", "").strip()
 
 # ==================== REGION / LANGUAGE ====================
 TMDB_LANGUAGE = os.getenv("TMDB_LANGUAGE", "de-DE").strip() or "de-DE"
-TMDB_FALLBACK_REGION = os.getenv("TMDB_FALLBACK_REGION", "DE").strip() or "DE"
+# A country code, matched against TMDB's uppercase iso_3166_1 values, so "de"
+# is read as "DE". A language code such as "en" is not a country and never
+# matches, which leaves every film without a certification from its own
+# country with none at all.
+TMDB_FALLBACK_REGION = os.getenv("TMDB_FALLBACK_REGION", "DE").strip().upper() or "DE"
 
 
 # ==================== LOGGING ====================

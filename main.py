@@ -424,7 +424,17 @@ def _prompt_clean_vanished(
     for line in title_link_rows(local_movies.get(str(mid), {}) for mid in missing_ids):
         print(f"    - {line}")
 
-    bulk = input("\n" + term.danger("Delete all these vanished entries?") + term.dim(" (y/n): ")).strip().lower()
+    # Anything but y or n walks the movies one at a time; say so, or that path
+    # (the only way to re-add a movie to the list) cannot be found.
+    bulk = (
+        input(
+            "\n"
+            + term.danger("Delete all these vanished entries?")
+            + term.dim(" (y = delete all, n = skip, Enter = decide one by one): ")
+        )
+        .strip()
+        .lower()
+    )
     if bulk == "y":
         removed = 0
         for movie_id in missing_ids:
