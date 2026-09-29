@@ -296,5 +296,26 @@ class TestRunFullScanReporting:
         enrich_mod.run_full_scan(client, force=True, resume=False)
 
         out = capsys.readouterr().out
-        assert "Status: Post Production → Released" in out
-        assert "1 had field changes (see above)." in out
+        # Once in the progress stream, once more in the recap after it.
+        assert out.count("Status: Post Production → Released") == 2
+        assert "● Movie One (2020)" in out
+        assert "Changes since the last scan: 1" in out
+        assert out.index("Changes since the last scan") < out.index("Full scan complete")
+        assert "1 had field changes (listed above)." in out
+
+    def test_unchanged_movies_keep_the_check_mark(
+        self,
+        tmp_project: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+        client: TMDBClient,
+    ) -> None:
+        save_index({"movies": {"1": {"id": 1, "title": "Movie One", "release_date": "2020-01-01"}}})
+        monkeypatch.setattr(enrich_mod, "_enrich_one", lambda *_args: [])
+
+        enrich_mod.run_full_scan(client, force=True, resume=False)
+
+        out = capsys.readouterr().out
+        assert "✓ Movie One (2020)" in out
+        assert "●" not in out
+        assert "Changes since the last scan" not in out

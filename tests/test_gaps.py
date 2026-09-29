@@ -64,6 +64,31 @@ class TestFindGaps:
         assert gaps["missing_films"][0]["id"] == 2
         assert gaps["indexed_count"] == 1
 
+    def test_missing_films_sort_by_year_with_undated_last(self, tmp_project) -> None:
+        save_index({"list_id": 8678795, "movies": {"1": {"id": 1, "title": "Parent"}}})
+        save_details(
+            {
+                "movies": {
+                    "1": {
+                        "id": 1,
+                        "collection": {
+                            "id": 10,
+                            "name": "Franchise",
+                            "parts": [
+                                {"id": 1, "title": "Parent", "release_date": "2000-01-01"},
+                                {"id": 2, "title": "A Untitled Sequel", "release_date": ""},
+                                {"id": 3, "title": "Later", "release_date": "2010-01-01"},
+                                {"id": 4, "title": "Earlier", "release_date": "1990-01-01"},
+                            ],
+                        },
+                        "keywords": [],
+                    }
+                }
+            }
+        )
+        gaps = find_gaps()
+        assert [film["id"] for film in gaps["missing_films"]] == [4, 3, 2]
+
     def test_keyword_tv_qualifies(self, tmp_project) -> None:
         save_index(
             {

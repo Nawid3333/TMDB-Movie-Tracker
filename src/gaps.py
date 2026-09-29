@@ -176,8 +176,9 @@ def find_gaps(*, persist: bool = True) -> dict:
     missing_films = _find_missing_collection_parts(index, details, indexed_ids, seen_ids)
     connected_tv = _find_connected_tv(details, keyword_counts, collection_tokens)
 
-    missing_films.sort(key=lambda x: (x.get("release_date") or "", x.get("title", "")))
-    connected_tv.sort(key=lambda x: (x.get("first_air_date") or "", x.get("name", "")))
+    # Oldest first; undated entries (unannounced sequels) go last, not first.
+    missing_films.sort(key=lambda x: (not x.get("release_date"), x.get("release_date") or "", x.get("title", "")))
+    connected_tv.sort(key=lambda x: (not x.get("first_air_date"), x.get("first_air_date") or "", x.get("name", "")))
 
     previous = load_gaps()
     prev_film_ids = _coerce_id_set(previous.get("shown_films"))

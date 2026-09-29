@@ -22,7 +22,8 @@ from src.atomic_io import atomic_write_json
 from src.index import ensure_record_exists, load_details, load_index, now_iso, save_details, save_index
 from src.posters import download_poster
 from src.tmdb_api import TMDBClient, pick_certification
-from src.ui.reports import title_link
+from src.ui.reports import title_line, title_link
+from src.ui.term import alert, bold, dim, err, ok, success, warn
 from src.ui.term import cprint as print
 
 logger = logging.getLogger(__name__)
@@ -409,6 +410,17 @@ def _save_checkpoint(done: set[int]) -> None:
             ENRICH_CHECKPOINT_FILE.unlink(missing_ok=True)
 
 
+def _print_changed(label: str, changes: list[tuple[str, str, str]]) -> None:
+    """Print a changed movie so it stands out from the dimmed unchanged rows.
+
+    The "●" marker (instead of "✓") keeps changed rows findable even when
+    colour is off; with colour, the old value is red and the new one green.
+    """
+    print(f"  {warn('●')} {bold(label)}")
+    for field, old_value, new_value in changes:
+        print(f"      {field}: {err(old_value)} → {ok(new_value)}")
+
+
 def run_full_scan(
     client: TMDBClient,
     *,
@@ -453,7 +465,9 @@ def run_full_scan(
     enriched: list[str] = []
     gone: list[str] = []
     failed: list[str] = []
-    changed_count = 0
+    # (sort key, label, changes) -- repeated in a recap after the scan so the
+    # changes don't have to be fished out of hundreds of progress lines.
+    changed: list[tuple[str, str, list[tuple[str, str, str]]]] = []
     try:
         image_client = httpx.Client(timeout=30)
         with concurrent.futures.ThreadPoolExecutor(max_workers=TMDB_DETAIL_WORKERS) as executor:
@@ -488,22 +502,24 @@ def run_full_scan(
                     # _enrich_one mutates `membership` in place, so the title is
                     # only reliable to read *after* future.result() returns.
                     label = title_link(membership) if membership.get("title") else f"#{movie_id}"
+                    # The label carries OSC 8 link codes, which make cprint skip
+                    # its marker colouring -- so every row is styled explicitly.
                     if membership.get("gone"):
                         gone.append(label)
-                        print(f"  ⚠ {label} — no longer on TMDB, marked gone")
+                        print(f"  {warn(f'⚠ {label} — no longer on TMDB, marked gone')}")
                     else:
                         enriched.append(label)
-                        print(f"  ✓ {label}")
                         if changes:
-                            changed_count += 1
-                            for field, old_value, new_value in changes:
-                                print(f"      {field}: {old_value} → {new_value}")
+                            changed.append((title_line(membership).casefold(), label, changes))
+                            _print_changed(label, changes)
+                        else:
+                            print(f"  {dim(f'✓ {label}')}")
                     logger.debug("Enriched %s", movie_id)
                 except Exception as exc:
                     logger.error("Failed to enrich %s: %s", movie_id, exc)
                     label = title_link(membership) if membership.get("title") else f"#{movie_id}"
                     failed.append(label)
-                    print(f"  ✗ {label} — {exc}")
+                    print(f"  {err(f'✗ {label} — {exc}')}")
                     # Do not add to checkpoint so resume can retry this movie.
     finally:
         if image_client is not None:
@@ -514,10 +530,18 @@ def run_full_scan(
     save_index(index)
     save_details(details)
     _save_checkpoint(set())
-    print(f"Full scan complete. Enriched {len(enriched)} {'movie' if len(enriched) == 1 else 'movies'}.")
-    if changed_count:
-        print(f"  {changed_count} had field changes (see above).")
+
+    if changed:
+        print()
+        print(alert(f"Changes since the last scan: {len(changed)}"))
+        for _key, label, changes in sorted(changed, key=lambda entry: entry[0]):
+            _print_changed(label, changes)
+        print()
+
+    print(success(f"Full scan complete. Enriched {len(enriched)} {'movie' if len(enriched) == 1 else 'movies'}."))
+    if changed:
+        print(f"  {len(changed)} had field changes (listed above).")
     if gone:
-        print(f"  {len(gone)} marked gone (no longer on TMDB).")
+        print(f"  {warn(f'{len(gone)} marked gone (no longer on TMDB).')}")
     if failed:
-        print(f"  {len(failed)} failed and will be retried on the next scan.")
+        print(f"  {err(f'{len(failed)} failed and will be retried on the next scan.')}")
