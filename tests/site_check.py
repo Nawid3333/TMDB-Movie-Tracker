@@ -96,9 +96,6 @@ def movie_field_problems(movie: object) -> list[str]:
         problems.append("credits.cast missing, so no cast would be stored")
     if not isinstance(crew, list) or not any(isinstance(p, dict) and p.get("job") == "Director" for p in crew):
         problems.append("no Director in credits.crew, so no director would be stored")
-    keywords = movie.get("keywords")
-    if not isinstance(keywords, dict) or not isinstance(keywords.get("keywords"), list) or not keywords["keywords"]:
-        problems.append("keywords.keywords missing, so the gaps report would find no franchises")
     external = movie.get("external_ids")
     if not isinstance(external, dict) or not external.get("imdb_id"):
         problems.append("external_ids.imdb_id missing")

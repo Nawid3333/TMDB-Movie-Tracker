@@ -17,9 +17,29 @@ from src.index import (
     save_index,
     validate_membership_record,
 )
-from src.tmdb_api import TMDBClient
+from src.tmdb_api import TMDBClient, check_status
 
 logger = logging.getLogger(__name__)
+
+
+def _json_object(resp: httpx.Response) -> dict:
+    """The response body as a dict; {} for an empty, non-JSON or non-object body.
+
+    An error page in front of TMDB (a proxy's HTML 403, a plain-text 401)
+    made resp.json() raise JSONDecodeError -- a ValueError, which the
+    `except httpx.HTTPError` around every list write does not catch -- so one
+    such reply aborted a whole batch push mid-way, with no summary of what had
+    already gone through. With {} the status check that follows reports it as
+    the failure it is.
+    """
+    if not resp.content:
+        return {}
+    try:
+        body = resp.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
 
 _TMDB_URL_RE = re.compile(r"(?:www\.)?(?:themoviedb|tmdb)\.org/movie/(\d+)")
 _IMDB_URL_RE = re.compile(r"imdb\.com/title/(tt\d+)")
@@ -32,8 +52,10 @@ __all__ = [
     "SearchError",
     "add_movie_locally",
     "fetch_full_movie",
+    "is_movie_reference",
     "push_to_tmdb_list",
     "resolve_movie_id_from_input",
+    "resolve_movie_input",
     "resolve_movie_ids_from_file",
     "search_movies",
 ]
@@ -99,7 +121,9 @@ def _lookup(
     """
     try:
         resp = client.get(endpoint, params=params)
-        resp.raise_for_status()
+        # check_status, not raise_for_status: the latter's message quotes the
+        # URL with api_key in it, and this one is logged and shown.
+        check_status(resp)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             return []
@@ -109,7 +133,10 @@ def _lookup(
         logger.error("%s failed: %s", endpoint, exc)
         raise SearchError(f"{endpoint} failed: {exc}") from exc
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise SearchError(f"{endpoint} returned a body that is not JSON") from exc
     if not isinstance(data, dict):
         return []
 
@@ -174,15 +201,14 @@ def fetch_full_movie(client: TMDBClient, movie_id: int, image_client: httpx.Clie
         EnrichError: when the record cannot be resolved or enriched.
         httpx.HTTPError, ValueError: passed through for unexpected failures.
     """
-    from src.enrich import _enrich_one, _LockedCache, _LockedListCache
+    from src.enrich import _enrich_one, _LockedCache
 
     index = load_index()
     details = load_details()
     membership, detail = ensure_record_exists(index, details, movie_id)
     collection_cache = _LockedCache()
-    keyword_tv_cache = _LockedListCache()
     try:
-        _enrich_one(client, membership, detail, collection_cache, keyword_tv_cache, image_client)
+        _enrich_one(client, membership, detail, collection_cache, image_client)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             # _enrich_one already marks the membership gone and returns, so
@@ -241,6 +267,47 @@ def _resolve_tmdb_id(
     return []
 
 
+def is_movie_reference(raw: str) -> bool:
+    """True when *raw* reads as a TMDB/IMDb movie URL or id -- no API call.
+
+    Lets a prompt reject a typo on the spot, before anything is looked up.
+    """
+    raw = raw.strip()
+    if not raw or raw.startswith("#"):
+        return False
+    try:
+        parsed = _parse_user_input(raw)
+    except ParseError:
+        return False
+    return parsed["type"] in ("tmdb_id", "imdb_id")
+
+
+def resolve_movie_input(
+    client: TMDBClient,
+    raw: str,
+    *,
+    language: str = TMDB_LANGUAGE,
+) -> tuple[dict | None, str]:
+    """Resolve a single TMDB/IMDb URL or raw id: ``(record, "")`` or ``(None, reason)``.
+
+    The reason tells apart the three ways this fails. They all used to come
+    back as a bare None, read as "not a valid URL or id" -- so with a bad API
+    key every line of a batch file was reported as malformed, and the real
+    problem (TMDB refusing the key) was never shown.
+    """
+    if not is_movie_reference(raw):
+        return None, "not a TMDB/IMDb movie URL or id"
+
+    try:
+        results = _resolve_tmdb_id(client, _parse_user_input(raw.strip()), language=language)
+    except SearchError as exc:
+        return None, f"TMDB lookup failed ({exc})"
+
+    if not results:
+        return None, "not found on TMDB"
+    return results[0], ""
+
+
 def resolve_movie_id_from_input(
     client: TMDBClient,
     raw: str,
@@ -250,26 +317,9 @@ def resolve_movie_id_from_input(
     """Resolve a single TMDB/IMDb URL or raw id to a membership record.
 
     Returns ``None`` when the input is blank, a comment, a title search,
-    or cannot be resolved to a movie.
+    or cannot be resolved to a movie; resolve_movie_input() says which.
     """
-    raw = raw.strip()
-    if not raw or raw.startswith("#"):
-        return None
-
-    try:
-        parsed = _parse_user_input(raw)
-    except ParseError:
-        return None
-
-    if parsed["type"] == "title":
-        return None
-
-    try:
-        results = _resolve_tmdb_id(client, parsed, language=language)
-    except SearchError:
-        return None
-
-    return results[0] if results else None
+    return resolve_movie_input(client, raw, language=language)[0]
 
 
 def resolve_movie_ids_from_file(
@@ -297,12 +347,20 @@ def resolve_movie_ids_from_file(
     records: list[dict] = []
     skipped: list[tuple[int, str, str]] = []
 
+    # utf-8-sig, not utf-8: a byte-order mark (Notepad's "UTF-8 with BOM")
+    # otherwise stays glued to the first line, which then reads "﻿603"
+    # and was skipped as an invalid id. A UTF-16 file -- what PowerShell 5's
+    # `>` writes -- raises UnicodeDecodeError, a ValueError that went
+    # straight past `except OSError` and ended the menu option.
     try:
-        with open(file_path, encoding="utf-8") as fh:
+        with open(file_path, encoding="utf-8-sig") as fh:
             lines = list(enumerate(fh, 1))
     except OSError as exc:
         logger.error("Could not read %s: %s", file_path, exc)
         raise SearchError(f"Could not read {file_path}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        logger.error("Could not decode %s: %s", file_path, exc)
+        raise SearchError(f"{file_path} is not UTF-8 text; save it as UTF-8 and try again") from exc
 
     seen: set[int] = set()
     for line_num, line in lines:
@@ -310,9 +368,9 @@ def resolve_movie_ids_from_file(
         if not raw or raw.startswith("#"):
             continue
 
-        record = resolve_movie_id_from_input(client, raw, language=language)
+        record, reason = resolve_movie_input(client, raw, language=language)
         if record is None:
-            skipped.append((line_num, raw, "could not resolve to a movie id/URL"))
+            skipped.append((line_num, raw, reason))
             continue
 
         movie_id = int(record["id"])
@@ -341,9 +399,7 @@ def push_to_tmdb_list(client: TMDBClient, list_id: str | int, movie_id: int) -> 
             f"/list/{list_id}/add_item",
             json_body={"media_id": movie_id},
         )
-        body = resp.json() if resp.text else {}
-        if not isinstance(body, dict):
-            body = {}
+        body = _json_object(resp)
         status_code = body.get("status_code")
         status_message = body.get("status_message", "unknown")
 
@@ -353,7 +409,7 @@ def push_to_tmdb_list(client: TMDBClient, list_id: str | int, movie_id: int) -> 
 
         # status_code 8 = duplicate entry; the movie is already on the list.
         if status_code == 8:
-            logger.info("Movie %s already on list %s: %s", movie_id, list_id, status_message)
+            logger.debug("Movie %s already on list %s: %s", movie_id, list_id, status_message)
             return {"success": True, "reason": status_message, "remote_push": "duplicate"}
 
         # Any other TMDB JSON status is a real failure; raise so the real message is logged.
@@ -364,7 +420,7 @@ def push_to_tmdb_list(client: TMDBClient, list_id: str | int, movie_id: int) -> 
                 response=resp,
             )
 
-        resp.raise_for_status()
+        check_status(resp)
         return {"success": True, "reason": "ok", "remote_push": "ok"}
     except httpx.HTTPError as exc:
         logger.error("Remote push failed: %s", exc)
@@ -391,9 +447,7 @@ def remove_from_tmdb_list(client: TMDBClient, list_id: str | int, media_id: int,
             f"/list/{list_id}/remove_item",
             json_body={"media_id": media_id},
         )
-        body = resp.json() if resp.text else {}
-        if not isinstance(body, dict):
-            body = {}
+        body = _json_object(resp)
         status_code = body.get("status_code")
         status_message = body.get("status_message", "unknown")
 
@@ -409,7 +463,7 @@ def remove_from_tmdb_list(client: TMDBClient, list_id: str | int, media_id: int,
                 response=resp,
             )
 
-        resp.raise_for_status()
+        check_status(resp)
         return {"success": True, "reason": "ok", "remote_push": "removed"}
     except httpx.HTTPError as exc:
         logger.error("Remote removal failed: %s", exc)
@@ -431,9 +485,7 @@ def _remove_from_tmdb_list_v4(client: TMDBClient, list_id: str | int, media_id: 
             f"/list/{list_id}/items",
             json_body={"items": [{"media_type": media_type, "media_id": media_id}]},
         )
-        body = resp.json() if resp.text else {}
-        if not isinstance(body, dict):
-            body = {}
+        body = _json_object(resp)
 
         results = body.get("results")
         item_result = None
@@ -451,7 +503,7 @@ def _remove_from_tmdb_list_v4(client: TMDBClient, list_id: str | int, media_id: 
         if body.get("success"):
             return {"success": True, "reason": "ok", "remote_push": "removed"}
 
-        resp.raise_for_status()
+        check_status(resp)
         reason = body.get("status_message", "unexpected v4 response")
         return {"success": False, "reason": reason, "remote_push": "failed"}
     except httpx.HTTPError as exc:

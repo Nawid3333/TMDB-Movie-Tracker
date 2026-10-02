@@ -1,6 +1,6 @@
 # TMDB Movie Tracker
 
-A small, terminal-driven Python tool that keeps a local mirror of a TMDB custom list, enriched with cast, crew, collections, keywords, certifications, recommendations and connected TV shows. It is built for people who want fast offline lookups, franchise-gap discovery and safe, approved-only updates.
+A small, terminal-driven Python tool that keeps a local mirror of a TMDB custom list, enriched with cast, crew, collections, certifications and recommendations. It tracks movies only. It is built for people who want fast offline lookups, franchise-gap discovery and safe, approved-only updates.
 
 > **Status:** personal project, tested on Windows with Python 3.14. It builds as
 > a wheel and installs as a `movie-tracker` command; running it from a clone is
@@ -11,8 +11,8 @@ A small, terminal-driven Python tool that keeps a local mirror of a TMDB custom 
 ## What it does
 
 - **Fast scan** — fetches the current TMDB list, diffs it against the local index and lets you approve additions/removals before saving. This is the quickest way to keep the index in sync.
-- **Full scan** — re-enriches every movie with full TMDB details (credits, keywords, release dates, watch providers, recommendations, similar, collection info, connected TV).
-- **Franchise gaps** — finds films in shared collections and connected TV series via keywords that are not yet in your index.
+- **Full scan** — re-enriches every movie with full TMDB details (credits, release dates, watch providers, recommendations, similar, collection info).
+- **Franchise gaps** — finds the films of your movies' TMDB collections that are not yet in your index. Movies only; no TV series.
 - **Search & add** — accepts a title, TMDB URL/ID or IMDb URL/ID and adds the movie locally (and optionally pushes it to the remote TMDB list when a session is available).
 - **Poster rendering** — downloads and renders inline posters for iTerm2, Kitty, Windows Terminal or block-art terminals (configurable, falls back to off).
 - **Atomic writes & backups** — every JSON write is atomic via temp-file + `fsync` + `os.replace`, with automatic `.bak1`/`.bak2`/`.bak3` rotation.
@@ -91,7 +91,7 @@ Menu
   ────────────────────────────────────────────────────
   1. Full scan       — every detail (slow, accurate)
   2. Fast scan       — list membership only (quick)
-  3. Franchise gaps  — connected films and TV you missed
+  3. Franchise gaps  — films from your movies' collections you missed
   0. Exit
 Enter your choice (0-3):
 ```
@@ -168,7 +168,7 @@ TMDB Movie Tracker/
 │   ├── atomic_io.py           # Atomic JSON writes with backups
 │   ├── changes.py             # Diff + approved merge for fast scan
 │   ├── enrich.py              # Full-scan enrichment engine
-│   ├── gaps.py                # Franchise / connected-TV discovery
+│   ├── gaps.py                # Franchise gaps (missing collection films)
 │   ├── index.py               # Index + details persistence helpers
 │   ├── list_fetcher.py        # Paginated TMDB list fetch + cache
 │   ├── posters.py             # Poster download / terminal rendering
@@ -295,7 +295,7 @@ See [LICENSE](LICENSE) for the full text.
 - Poster rendering relies on terminal emulator support.
 - Packaging (`pip install`) is implemented via `pyproject.toml`; run `pip install -e .` to install the `movie-tracker` console script.
 - CI/CD, automated releases and pre-built binaries are not provided.
-- Franchise-gap detection is heuristic-based; false positives happen for generic keywords.
+- Franchise gaps come from TMDB collections only; a related film TMDB has not put in the same collection is not reported.
 
 ---
 

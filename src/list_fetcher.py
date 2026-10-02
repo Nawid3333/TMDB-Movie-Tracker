@@ -8,7 +8,7 @@ from pathlib import Path
 import config.config as _config
 from config.config import DATA_DIR
 from src.atomic_io import atomic_write_json
-from src.tmdb_api import _TMDBClientLike
+from src.tmdb_api import _TMDBClientLike, check_status
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,9 @@ def _list_cache_path(list_id: str | int, data_dir: Path) -> Path:
 def _fetch_page(client: _TMDBClientLike, list_id: str | int, page: int, *, auth: bool = False) -> dict:
     """Fetch a single page of the list."""
     resp = client.get(f"/list/{list_id}", params={"page": page}, auth=auth)
-    resp.raise_for_status()
+    # Not resp.raise_for_status(): its message quotes the URL, api_key and
+    # all, and the caller logs it -- on every fetch of a private list.
+    check_status(resp)
     data = resp.json()
     if not isinstance(data, dict):
         raise ListFetchError(f"List {list_id} page {page} returned non-object body")

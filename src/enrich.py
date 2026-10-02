@@ -2,10 +2,12 @@
 
 import concurrent.futures
 import contextlib
+import functools
 import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,14 +23,19 @@ from config.config import (
 from src.atomic_io import atomic_write_json
 from src.index import ensure_record_exists, load_details, load_index, now_iso, save_details, save_index
 from src.posters import download_poster
-from src.tmdb_api import TMDBClient, pick_certification
+from src.tmdb_api import TMDBClient, check_status, is_auth_rejected, pick_certification
 from src.ui.reports import title_line, title_link
 from src.ui.term import alert, bold, dim, err, ok, success, warn
 from src.ui.term import cprint as print
 
 logger = logging.getLogger(__name__)
 
-_APPEND_TO_RESPONSE = "credits,keywords,external_ids,release_dates,videos,watch/providers,recommendations,similar"
+# No "keywords": they only ever fed the connected-TV lookup, which is gone --
+# this tracker is for movies. Keywords already in details.json stay as they are.
+_APPEND_TO_RESPONSE = "credits,external_ids,release_dates,videos,watch/providers,recommendations,similar"
+
+# How often a full scan saves its progress (index, details, then checkpoint).
+_CHECKPOINT_SECONDS = 60.0
 
 
 def _release_year(release_date: str) -> int | None:
@@ -75,6 +82,13 @@ def _volatility_tier(record: dict) -> str:
 def _should_enrich(record: dict, details: dict, force: bool = False) -> bool:
     if force:
         return True
+    if "collection" in (details.get("enrich_incomplete") or []):
+        # The collection lookup failed last time. What is on record for it is
+        # the older data kept as a stand-in, so the movie is due again
+        # whatever its tier -- a cold film would otherwise carry the gap for
+        # COLD_REENRICH_DAYS. (A leftover "connected_tv" marker from the
+        # removed TV lookup does not count; the next enrich clears it.)
+        return True
     tier = _volatility_tier(record)
     if tier in ("hot", "warm"):
         return True
@@ -100,9 +114,10 @@ def _should_enrich(record: dict, details: dict, force: bool = False) -> bool:
 
 
 def _fetch_collection(client: TMDBClient, collection_id: int) -> dict | None:
+    """The collection's parts, or None when the lookup failed."""
     try:
         resp = client.get(f"/collection/{collection_id}")
-        resp.raise_for_status()
+        check_status(resp)
         data = resp.json()
         if not isinstance(data, dict):
             return None
@@ -120,113 +135,63 @@ def _fetch_collection(client: TMDBClient, collection_id: int) -> dict | None:
         return None
 
 
-def _fetch_keyword_tv(client: TMDBClient, keyword_id: int) -> list[dict]:
-    """Fetch TV series for a keyword via discover/tv."""
-    try:
-        resp = client.get("/discover/tv", params={"with_keywords": keyword_id})
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("results", []) if isinstance(data, dict) else []
-        return [
-            {"id": r.get("id"), "name": r.get("name"), "first_air_date": r.get("first_air_date")}
-            for r in results
-            if isinstance(r, dict) and r.get("id")
-        ]
-    except Exception as exc:
-        logger.warning("Keyword TV fetch failed for %s: %s", keyword_id, exc)
-        return []
-
-
 class _LockedCache:
-    """Small thread-safe cache wrapper used by the worker pool."""
+    """Thread-safe per-run cache that asks TMDB for each collection at most once.
+
+    Many movies share a collection, and the worker pool used to
+    check-then-set: two workers missing the same key at the same moment both
+    fetched it. And because a stored None read back exactly like a miss, a
+    collection whose lookup failed was fetched again -- three attempts and a
+    backoff each time -- by every movie in it. get_or_fetch() holds a per-key
+    lock across the fetch, so the second worker waits for the first one's
+    answer, and remembers every answer for the run, a failure (None)
+    included: an outage costs one failed lookup per key, not one per movie.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        # None is a cached value, not a miss: a fetch that came back empty is
-        # remembered so the worker pool does not ask for it again.
-        self._data: dict[int, dict | None] = {}
+        self._data: dict[int, Any] = {}
+        self._key_locks: dict[int, threading.Lock] = {}
 
-    def get(self, key: int) -> dict | None:
+    def get_or_fetch(self, key: int, fetch: Callable[[], Any]) -> Any:
         with self._lock:
-            return self._data.get(key)
-
-    def set(self, key: int, value: dict | None) -> None:
-        with self._lock:
-            self._data[key] = value
-
-
-class _LockedListCache:
-    """Thread-safe cache for list-of-dict values."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._data: dict[int, list[dict]] = {}
-
-    def get(self, key: int) -> list[dict] | None:
-        with self._lock:
-            return self._data.get(key)
-
-    def set(self, key: int, value: list[dict]) -> None:
-        with self._lock:
-            self._data[key] = value
+            if key in self._data:
+                return self._data[key]
+            key_lock = self._key_locks.setdefault(key, threading.Lock())
+        with key_lock:
+            with self._lock:
+                if key in self._data:
+                    return self._data[key]
+            value = fetch()
+            with self._lock:
+                self._data[key] = value
+            return value
 
 
 def _resolve_collection(
     client: TMDBClient,
-    membership: dict,
     details: dict,
     collection_cache: _LockedCache,
-) -> None:
+    previous: Any,
+) -> bool:
+    """Fill in the movie's collection parts; False when the lookup failed.
+
+    A failed lookup used to leave the fresh, empty "parts" in place -- and the
+    movie was still stamped enriched, so a cold film went 90 days with its
+    whole franchise missing from the gaps report. Now the parts already on
+    record for the same collection are kept, and the caller marks the
+    enrichment incomplete so the next scan asks again.
+    """
     collection_id = (details.get("collection") or {}).get("id")
     if not collection_id:
-        return
-    cached = collection_cache.get(collection_id)
-    if cached is None:
-        collection_cache.set(collection_id, _fetch_collection(client, collection_id))
-        cached = collection_cache.get(collection_id)
-    if cached:
-        details["collection"] = cached
-
-
-def _resolve_connected_tv(
-    client: TMDBClient,
-    membership: dict,
-    details: dict,
-    keyword_tv_cache: _LockedListCache,
-) -> None:
-    keywords = details.get("keywords", [])
-    if not keywords:
-        return
-    connected: list[dict] = []
-    for kw in keywords:
-        if not isinstance(kw, dict):
-            continue
-        kw_id = kw.get("id")
-        kw_name = kw.get("name", "")
-        if not kw_id:
-            continue
-        cached = keyword_tv_cache.get(kw_id)
-        if cached is None:
-            keyword_tv_cache.set(kw_id, _fetch_keyword_tv(client, kw_id))
-            cached = keyword_tv_cache.get(kw_id)
-        for series in cached or []:
-            connected.append(
-                {
-                    "id": series["id"],
-                    "name": series["name"],
-                    "first_air_date": series.get("first_air_date"),
-                    "via_keyword": kw_name,
-                }
-            )
-    # Deduplicate by series id, preserving first via_keyword.
-    seen = set()
-    deduped = []
-    for item in connected:
-        key = item["id"]
-        if key not in seen:
-            seen.add(key)
-            deduped.append(item)
-    details["connected_tv"] = deduped
+        return True
+    fetched = collection_cache.get_or_fetch(collection_id, functools.partial(_fetch_collection, client, collection_id))
+    if fetched:
+        details["collection"] = fetched
+        return True
+    if isinstance(previous, dict) and previous.get("id") == collection_id and previous.get("parts"):
+        details["collection"] = previous
+    return False
 
 
 def _extract_titles(movie: dict, language: str = TMDB_LANGUAGE) -> dict[str, str]:
@@ -255,7 +220,7 @@ def _extract_titles(movie: dict, language: str = TMDB_LANGUAGE) -> dict[str, str
 def _enrichment_snapshot(membership: dict, details: dict) -> dict[str, str]:
     """A comparable, display-ready snapshot of the fields worth telling the user about.
 
-    Deliberately narrow: cast/crew/keywords/overview churn on TMDB constantly
+    Deliberately narrow: cast/crew/overview churn on TMDB constantly
     and would swamp a change report in noise. These are the fields a re-enrich
     can change that actually matter to someone tracking whether a film is
     watchable yet (status, release date) or worth re-checking (runtime,
@@ -278,7 +243,6 @@ def _enrich_one(
     membership: dict,
     details: dict,
     collection_cache: _LockedCache,
-    keyword_tv_cache: _LockedListCache,
     image_client: Any,
 ) -> list[tuple[str, str, str]]:
     """Fetch and merge full details for a single movie.
@@ -286,9 +250,16 @@ def _enrich_one(
     Returns a list of (field, old_value, new_value) for fields that changed
     since the last time this movie was enriched -- empty on a movie's first
     enrichment (nothing to compare against yet) or when nothing changed.
+
+    Movies only: nothing here asks TMDB about TV. A "connected_tv" or
+    "keywords" entry left in details.json by an older build is neither read
+    nor rewritten.
     """
     was_enriched_before = bool(details.get("enriched_at"))
     before = _enrichment_snapshot(membership, details) if was_enriched_before else None
+    # Kept before the fresh response overwrites it, so a failed collection
+    # lookup below can fall back to what an earlier enrich found.
+    previous_collection = details.get("collection")
 
     movie_id = membership["id"]
     params = {"language": TMDB_LANGUAGE, "append_to_response": _APPEND_TO_RESPONSE}
@@ -297,12 +268,20 @@ def _enrich_one(
         # TMDB merged or deleted the record. Mark gone but keep data.
         membership["gone"] = True
         membership["gone_since"] = membership.get("gone_since") or now_iso()
-        logger.info("Movie %s no longer resolves on TMDB; marked gone", movie_id)
+        logger.debug("Movie %s no longer resolves on TMDB; marked gone", movie_id)
         return []
-    resp.raise_for_status()
+    check_status(resp)
     movie = resp.json()
     if not isinstance(movie, dict):
         raise ValueError(f"Movie {movie_id} returned non-object body")
+
+    if membership.get("gone"):
+        # Only Force re-enrich asks TMDB about a movie marked gone, and it
+        # answered: the 404 that marked it was not the last word. Track it
+        # normally again rather than leave it frozen for good.
+        logger.info("Movie %s resolves on TMDB again; no longer marked gone", movie_id)
+        membership["gone"] = False
+        membership.pop("gone_since", None)
 
     titles = _extract_titles(movie)
     membership["title"] = titles["title"] or membership.get("title", "")
@@ -370,10 +349,11 @@ def _enrich_one(
     elif "collection" not in details:
         details["collection"] = {"id": None, "name": None, "parts": []}
 
-    details["keywords"] = [k.get("name") for k in movie.get("keywords", {}).get("keywords", []) if isinstance(k, dict)]
-
-    _resolve_collection(client, membership, details, collection_cache)
-    _resolve_connected_tv(client, membership, details, keyword_tv_cache)
+    if _resolve_collection(client, details, collection_cache, previous_collection):
+        details.pop("enrich_incomplete", None)
+    else:
+        # Read by _should_enrich: due again on the next scan whatever the tier.
+        details["enrich_incomplete"] = ["collection"]
 
     # Poster cache.
     if membership.get("poster_path"):
@@ -427,8 +407,16 @@ def run_full_scan(
     force: bool = False,
     resume: bool = True,
 ) -> None:
-    """Enrich every movie in the local index that is due."""
-    logger.info("Starting full scan...")
+    """Enrich every movie in the local index that is due.
+
+    Progress is saved as it goes: every checkpoint writes the index and
+    details first and the checkpoint after, so an id in the checkpoint always
+    has its enrichment on disk. The checkpoint used to be written alone --
+    after an interrupt or a crash, the next run skipped those movies although
+    nothing of theirs had been saved, called itself complete, and deleted
+    the checkpoint.
+    """
+    logger.debug("Starting full scan...")
     index = load_index()
     details = load_details()
 
@@ -443,7 +431,12 @@ def run_full_scan(
         movie_id = membership.get("id")
         if not movie_id:
             continue
-        if movie_id in done or membership.get("gone"):
+        if movie_id in done:
+            continue
+        # A movie marked gone is skipped by an ordinary scan, but Force
+        # re-enrich asks again: nothing else ever cleared the flag, so one
+        # wrong 404 used to freeze a movie for good.
+        if membership.get("gone") and not force:
             continue
         detail = details.get("movies", {}).get(key, {})
         if force or _should_enrich(membership, detail, force=force):
@@ -459,68 +452,117 @@ def run_full_scan(
     print(f"Enriching {len(todo)} {word}...")
 
     collection_cache = _LockedCache()
-    keyword_tv_cache = _LockedListCache()
 
     image_client: Any | None = None
     enriched: list[str] = []
     gone: list[str] = []
     failed: list[str] = []
+    partial: list[str] = []
     # (sort key, label, changes) -- repeated in a recap after the scan so the
     # changes don't have to be fished out of hundreds of progress lines.
     changed: list[tuple[str, str, list[tuple[str, str, str]]]] = []
+    # Each worker enriches its own *copies* of a movie's two records, and only
+    # a finished enrichment is put into the index, from this thread. That is
+    # what makes saving mid-scan safe -- no worker is writing into the dicts
+    # being serialized -- and it keeps a movie whose enrichment raised half way
+    # out of the saved data entirely.
+    futures: dict[concurrent.futures.Future, tuple[int, dict, dict]] = {}
+    recorded: set[concurrent.futures.Future] = set()
+
+    def _save_progress() -> None:
+        # Data first, checkpoint second: the checkpoint vouches for what is on disk.
+        save_index(index)
+        save_details(details)
+        _save_checkpoint(done)
+
+    def _record(future: concurrent.futures.Future) -> BaseException | None:
+        """Report one finished movie and merge it in; return its exception, if any."""
+        recorded.add(future)
+        movie_id, membership, detail = futures[future]
+        label = title_link(membership) if membership.get("title") else f"#{movie_id}"
+        try:
+            changes = future.result()
+        except Exception as exc:
+            logger.error("Failed to enrich %s: %s", movie_id, exc)
+            failed.append(label)
+            print(f"  {err(f'✗ {label} — {exc}')}")
+            # Not merged and not checkpointed, so the next scan retries it.
+            return exc
+        key = str(movie_id)
+        index["movies"][key] = membership
+        details["movies"][key] = detail
+        done.add(movie_id)
+        # The label carries OSC 8 link codes, which make cprint skip
+        # its marker colouring -- so every row is styled explicitly.
+        if membership.get("gone"):
+            gone.append(label)
+            print(f"  {warn(f'⚠ {label} — no longer on TMDB, marked gone')}")
+        else:
+            enriched.append(label)
+            if "collection" in (detail.get("enrich_incomplete") or []):
+                partial.append(label)
+            if changes:
+                changed.append((title_line(membership).casefold(), label, changes))
+                _print_changed(label, changes)
+            else:
+                print(f"  {dim(f'✓ {label}')}")
+        logger.debug("Enriched %s", movie_id)
+        return None
+
+    def _stop(executor: concurrent.futures.ThreadPoolExecutor) -> None:
+        # Drop every queued movie and wait only for the ones already running.
+        # Leaving the `with` block on its own waits for the whole queue: one
+        # Ctrl+C on a large index still fetched every movie before it took
+        # effect, and then threw all of it away.
+        try:
+            executor.shutdown(wait=True, cancel_futures=True)
+        finally:
+            for future in futures:
+                if future not in recorded and future.done() and not future.cancelled():
+                    _record(future)
+            _save_progress()
+
     try:
         image_client = httpx.Client(timeout=30)
         with concurrent.futures.ThreadPoolExecutor(max_workers=TMDB_DETAIL_WORKERS) as executor:
-            futures = {}
-            membership_by_id: dict[int, dict] = {}
             for movie_id, _key in todo:
                 membership, detail = ensure_record_exists(index, details, movie_id)
-                membership_by_id[movie_id] = membership
+                work_membership, work_detail = dict(membership), dict(detail)
                 future = executor.submit(
                     _enrich_one,
                     client,
-                    membership,
-                    detail,
+                    work_membership,
+                    work_detail,
                     collection_cache,
-                    keyword_tv_cache,
                     image_client,
                 )
-                futures[future] = movie_id
+                futures[future] = (movie_id, work_membership, work_detail)
 
-            checkpoint_interval = 60.0  # seconds
             last_checkpoint = time.monotonic()
-            for future in concurrent.futures.as_completed(futures):
-                movie_id = futures[future]
-                membership = membership_by_id[movie_id]
-                try:
-                    changes = future.result()
-                    done.add(movie_id)
+            auth_rejected = False
+            try:
+                for future in concurrent.futures.as_completed(futures):
+                    exc = _record(future)
+                    if exc is not None and is_auth_rejected(exc):
+                        # A 401 means TMDB refused the API key or the session:
+                        # every remaining movie would fail the same way.
+                        auth_rejected = True
+                        break
                     now = time.monotonic()
-                    if now - last_checkpoint >= checkpoint_interval:
-                        _save_checkpoint(done)
+                    if now - last_checkpoint >= _CHECKPOINT_SECONDS:
+                        _save_progress()
                         last_checkpoint = now
-                    # _enrich_one mutates `membership` in place, so the title is
-                    # only reliable to read *after* future.result() returns.
-                    label = title_link(membership) if membership.get("title") else f"#{movie_id}"
-                    # The label carries OSC 8 link codes, which make cprint skip
-                    # its marker colouring -- so every row is styled explicitly.
-                    if membership.get("gone"):
-                        gone.append(label)
-                        print(f"  {warn(f'⚠ {label} — no longer on TMDB, marked gone')}")
-                    else:
-                        enriched.append(label)
-                        if changes:
-                            changed.append((title_line(membership).casefold(), label, changes))
-                            _print_changed(label, changes)
-                        else:
-                            print(f"  {dim(f'✓ {label}')}")
-                    logger.debug("Enriched %s", movie_id)
-                except Exception as exc:
-                    logger.error("Failed to enrich %s: %s", movie_id, exc)
-                    label = title_link(membership) if membership.get("title") else f"#{movie_id}"
-                    failed.append(label)
-                    print(f"  {err(f'✗ {label} — {exc}')}")
-                    # Do not add to checkpoint so resume can retry this movie.
+            except BaseException:
+                # Ctrl+C, or anything unexpected: keep what finished, then stop.
+                _stop(executor)
+                print(warn(f"  ⚠ Stopped. {len(done)} enriched movie(s) are saved; the next scan resumes."))
+                raise
+            if auth_rejected:
+                _stop(executor)
+                print()
+                print(err("✗ TMDB rejected the API key or session (HTTP 401); the scan was stopped."))
+                print("  Check TMDB_API_KEY and TMDB_SESSION_ID in .env. Movies enriched before this are saved.")
+                return
     finally:
         if image_client is not None:
             image_client.close()
@@ -545,3 +587,8 @@ def run_full_scan(
         print(f"  {warn(f'{len(gone)} marked gone (no longer on TMDB).')}")
     if failed:
         print(f"  {err(f'{len(failed)} failed and will be retried on the next scan.')}")
+    if partial:
+        print(
+            f"  {warn(f'{len(partial)} had their collection lookup fail; the earlier collection data is kept')}"
+            " and they are fetched again on the next scan."
+        )

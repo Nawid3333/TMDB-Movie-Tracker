@@ -6,10 +6,13 @@ import respx
 
 import config.config as _config
 from src.search import (
+    SearchError,
     _parse_user_input,
     fetch_full_movie,
     push_to_tmdb_list,
     remove_from_tmdb_list,
+    resolve_movie_ids_from_file,
+    resolve_movie_input,
     search_movies,
 )
 from src.tmdb_api import TMDBClient
@@ -245,3 +248,89 @@ class TestRemoveFromTmdbListV4:
         assert result["success"] is True
         assert v3_route.called
         assert not v4_route.called
+
+
+class TestNonJsonErrorBodies:
+    """An error page in front of TMDB (an HTML 403, a plain-text 401).
+
+    resp.json() raised JSONDecodeError -- a ValueError, which the
+    `except httpx.HTTPError` around these calls does not catch -- so one such
+    reply ended a whole batch push half way through.
+    """
+
+    _HTML_403 = httpx.Response(403, text="<html>403 Forbidden</html>", headers={"content-type": "text/html"})
+
+    @respx.mock
+    def test_a_push_reports_a_failure(self, client: TMDBClient) -> None:
+        client.session_id = "fake_session"
+        respx.post("https://api.themoviedb.org/3/list/8678795/add_item").mock(return_value=self._HTML_403)
+        result = push_to_tmdb_list(client, 8678795, 550)
+        assert result["success"] is False
+        assert result["remote_push"] == "failed"
+        assert "HTTP 403" in result["reason"]
+
+    @respx.mock
+    def test_a_v3_removal_reports_a_failure(self, client: TMDBClient) -> None:
+        client.session_id = "fake_session"
+        respx.post("https://api.themoviedb.org/3/list/8678795/remove_item").mock(
+            return_value=httpx.Response(401, text="Unauthorized")
+        )
+        result = remove_from_tmdb_list(client, 8678795, 550)
+        assert result["success"] is False
+        assert "HTTP 401" in result["reason"]
+
+    @respx.mock
+    def test_a_v4_removal_reports_a_failure(self, client: TMDBClient, monkeypatch) -> None:
+        monkeypatch.setattr(_config, "TMDB_V4_ACCESS_TOKEN", "fake_v4_token")
+        respx.delete("https://api.themoviedb.org/4/list/8678795/items").mock(return_value=self._HTML_403)
+        result = remove_from_tmdb_list(client, 8678795, 277439, media_type="tv")
+        assert result["success"] is False
+
+    @respx.mock
+    def test_a_failure_message_never_carries_the_credentials(self, client: TMDBClient) -> None:
+        client.session_id = "SECRETSESSION"
+        respx.post("https://api.themoviedb.org/3/list/8678795/add_item").mock(return_value=self._HTML_403)
+        result = push_to_tmdb_list(client, 8678795, 550)
+        assert "test_key" not in result["reason"]
+        assert "SECRETSESSION" not in result["reason"]
+
+
+class TestBatchFileReading:
+    """What a batch file's lines come back as, and why a line was skipped."""
+
+    def _movie(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": int(request.url.path.rsplit("/", 1)[1]), "title": "X"})
+
+    @respx.mock
+    def test_a_byte_order_mark_does_not_cost_the_first_line(self, tmp_path, client: TMDBClient) -> None:
+        """Notepad's "UTF-8 with BOM" left the mark on line 1: "\\ufeff603" was skipped."""
+        path = tmp_path / "urls.txt"
+        path.write_text("603\n550\n", encoding="utf-8-sig")
+        respx.get(url__regex=r"https://api\.themoviedb\.org/3/movie/\d+").mock(side_effect=self._movie)
+        records, skipped = resolve_movie_ids_from_file(client, str(path))
+        assert [r["id"] for r in records] == [603, 550]
+        assert skipped == []
+
+    def test_a_utf16_file_is_a_search_error_not_a_crash(self, tmp_path, client: TMDBClient) -> None:
+        """What PowerShell 5's `>` writes. UnicodeDecodeError went past `except OSError`."""
+        path = tmp_path / "urls.txt"
+        path.write_text("603\n", encoding="utf-16")
+        with pytest.raises(SearchError, match="not UTF-8"):
+            resolve_movie_ids_from_file(client, str(path))
+
+    @respx.mock
+    def test_a_rejected_key_is_reported_as_such_not_as_a_bad_line(self, tmp_path, client: TMDBClient) -> None:
+        path = tmp_path / "urls.txt"
+        path.write_text("603\nnot a movie\n", encoding="utf-8")
+        respx.get("https://api.themoviedb.org/3/movie/603").mock(return_value=httpx.Response(401, json={}))
+        records, skipped = resolve_movie_ids_from_file(client, str(path))
+        assert records == []
+        assert skipped == [
+            (1, "603", "TMDB lookup failed (/movie/603 failed: HTTP 401 for GET /3/movie/603)"),
+            (2, "not a movie", "not a TMDB/IMDb movie URL or id"),
+        ]
+
+    @respx.mock
+    def test_a_movie_tmdb_does_not_have_says_so(self, client: TMDBClient) -> None:
+        respx.get("https://api.themoviedb.org/3/movie/999999999").mock(return_value=httpx.Response(404))
+        assert resolve_movie_input(client, "999999999") == (None, "not found on TMDB")

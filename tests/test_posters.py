@@ -79,6 +79,37 @@ class TestDownloadPosterEdges:
         assert download_poster(httpx_client, 550, "/abc.jpg", posters_dir=tmp_path) is None
         assert not poster_cache_path(550, "/abc.jpg", tmp_path).exists()
 
+
+class TestPosterWritesAreAtomic:
+    """Posters were written straight to their final name, and "it exists" was the cache check.
+
+    A run stopped mid-write left a short file there, and it was kept forever.
+    """
+
+    @respx.mock
+    def test_a_write_that_fails_leaves_nothing_under_the_final_name(
+        self, tmp_path: Path, httpx_client: httpx.Client
+    ) -> None:
+        respx.get("https://image.tmdb.org/t/p/w342/abc.jpg").mock(return_value=httpx.Response(200, content=b"x" * 64))
+        with patch("src.atomic_io.os.replace", side_effect=OSError("disk full")):
+            assert download_poster(httpx_client, 550, "/abc.jpg", posters_dir=tmp_path) is None
+        assert not poster_cache_path(550, "/abc.jpg", tmp_path).exists()
+        assert not list(tmp_path.glob("*.tmp"))
+
+    @respx.mock
+    def test_an_empty_cached_file_is_fetched_again(self, tmp_path: Path, httpx_client: httpx.Client) -> None:
+        dest = poster_cache_path(550, "/abc.jpg", tmp_path)
+        dest.write_bytes(b"")
+        respx.get("https://image.tmdb.org/t/p/w342/abc.jpg").mock(return_value=httpx.Response(200, content=b"fresh"))
+        assert download_poster(httpx_client, 550, "/abc.jpg", posters_dir=tmp_path) == dest
+        assert dest.read_bytes() == b"fresh"
+
+    @respx.mock
+    def test_an_empty_body_is_not_cached(self, tmp_path: Path, httpx_client: httpx.Client) -> None:
+        respx.get("https://image.tmdb.org/t/p/w342/abc.jpg").mock(return_value=httpx.Response(200, content=b""))
+        assert download_poster(httpx_client, 550, "/abc.jpg", posters_dir=tmp_path) is None
+        assert not poster_cache_path(550, "/abc.jpg", tmp_path).exists()
+
     def test_a_transport_error_returns_none_rather_than_raising(
         self, tmp_path: Path, httpx_client: httpx.Client
     ) -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 
 from config.config import POSTER_MODE, POSTER_SIZE
+from src.atomic_io import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,10 @@ def download_poster(
     if not poster_path:
         return None
     dest = poster_cache_path(movie_id, poster_path, posters_dir)
-    if skip_existing and dest.exists():
+    # An empty file is not a cached poster. Writes used to go straight to
+    # the final name, so a run stopped mid-write left a short file there, and
+    # this check -- "it exists" -- then kept it for good.
+    if skip_existing and dest.exists() and dest.stat().st_size > 0:
         return dest
 
     url = _poster_url(poster_path)
@@ -57,9 +61,11 @@ def download_poster(
         if resp.status_code >= 400:
             logger.warning("Poster fetch failed for %s: HTTP %s", movie_id, resp.status_code)
             return None
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with open(dest, "wb") as f:
-            f.write(resp.content)
+        if not resp.content:
+            logger.warning("Poster fetch for %s returned an empty body", movie_id)
+            return None
+        # Atomic: the poster appears under its final name complete or not at all.
+        atomic_write_bytes(dest, resp.content)
         return dest
     except Exception as exc:
         logger.warning("Poster download failed for %s: %s", movie_id, exc)

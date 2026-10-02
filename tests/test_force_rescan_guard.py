@@ -8,6 +8,7 @@ confirms first, and a refusal must not reach the enrichment call at all.
 
 from pathlib import Path
 from typing import cast
+from unittest import mock
 
 import pytest
 
@@ -52,17 +53,29 @@ class TestForceRescanConfirms:
 
         assert "all 3 movie(s)" in capsys.readouterr().out
 
-    def test_the_default_answer_is_no(self, _index, monkeypatch: pytest.MonkeyPatch) -> None:
-        """An accidental Enter must not launch it."""
-        seen = {}
+    def test_enter_alone_does_not_launch_it(self, _index, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+        """An accidental Enter must not launch it.
 
-        def _confirm(prompt, default=False):
-            seen["default"] = default
-            return default
-
+        It used to be safe by a default ("[y/N]", Enter meant no). There are no
+        defaults now: Enter is asked again like any other non-answer, and a run
+        of them ends in the safe answer, no.
+        """
+        # A finite feed: asking once more than allowed raises StopIteration
+        # instead of looping forever.
+        feed = mock.Mock(side_effect=[""] * main.prompts.MAX_UNRECOGNIZED)
         monkeypatch.setattr(main, "enrich_run_full_scan", lambda *a, **k: pytest.fail("should not run"))
-        monkeypatch.setattr(main.prompts, "confirm", _confirm)
+        monkeypatch.setattr("builtins.input", feed)
 
         main.run_force_full_scan(cast(TMDBClient, object()))
 
-        assert seen["default"] is False
+        assert feed.call_count == main.prompts.MAX_UNRECOGNIZED
+        assert "Cancelled" in capsys.readouterr().out
+
+    def test_the_prompt_says_gone_movies_are_asked_about_again(
+        self, _index, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        monkeypatch.setattr(main.prompts, "confirm", lambda *a, **k: False)
+
+        main.run_force_full_scan(cast(TMDBClient, object()))
+
+        assert "marked gone are asked about again" in capsys.readouterr().out

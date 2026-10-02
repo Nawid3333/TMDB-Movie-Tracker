@@ -1,5 +1,6 @@
 """Tests for src.tmdb_api."""
 
+import threading
 import time
 from unittest.mock import patch
 
@@ -7,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from src.tmdb_api import TMDBClient, TokenBucket, pick_certification
+from src.tmdb_api import TMDBClient, TokenBucket, check_status, pick_certification
 
 
 class TestTokenBucket:
@@ -24,6 +25,64 @@ class TestTokenBucket:
         with patch("time.sleep") as mock_sleep:
             bucket.acquire()
             mock_sleep.assert_called_once()
+
+    def test_callers_arriving_together_queue_one_slot_apart(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The old bucket gave every caller that found it empty the same short
+        wait, so they all went at once; each one now waits behind the last."""
+        monkeypatch.setattr("src.tmdb_api.time.monotonic", lambda: 1000.0)
+        bucket = TokenBucket(rate_per_second=10)
+        waits: list[float] = []
+        monkeypatch.setattr("src.tmdb_api.time.sleep", waits.append)
+
+        for _ in range(5):
+            bucket.acquire()
+
+        assert waits == pytest.approx([0.1, 0.2, 0.3, 0.4])
+
+    def test_the_rate_holds_across_concurrent_workers(self) -> None:
+        """Measured on the old bucket: 16 workers at a configured 30/s ran 486/s."""
+        rate = 40.0
+        bucket = TokenBucket(rate_per_second=rate)
+        count = 0
+        lock = threading.Lock()
+        deadline = time.monotonic() + 0.5
+
+        def worker() -> None:
+            nonlocal count
+            while time.monotonic() < deadline:
+                bucket.acquire()
+                with lock:
+                    count += 1
+
+        started = time.monotonic()
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        elapsed = time.monotonic() - started
+
+        # One token of burst, plus each worker's last reservation past the deadline.
+        assert count <= rate * elapsed + 1 + len(threads)
+
+
+class TestCheckStatus:
+    """raise_for_status() quoted the whole URL -- api_key and session_id with it."""
+
+    def _response(self, status: int) -> httpx.Response:
+        request = httpx.Request(
+            "GET", "https://api.themoviedb.org/3/movie/11?api_key=SECRETKEY&session_id=SECRETSESSION"
+        )
+        return httpx.Response(status, request=request)
+
+    def test_a_failure_names_the_status_method_and_path_only(self) -> None:
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            check_status(self._response(401))
+        assert str(caught.value) == "HTTP 401 for GET /3/movie/11"
+        assert caught.value.response.status_code == 401
+
+    def test_success_passes(self) -> None:
+        check_status(self._response(200))
 
 
 class TestTMDBClient:
@@ -55,6 +114,33 @@ class TestTMDBClient:
         with patch("time.sleep"), pytest.raises(httpx.HTTPStatusError):
             client.get("/movie/550", auth=False, retries=2)
         assert len(route.calls) == 2
+
+    @respx.mock
+    def test_every_attempt_waits_for_the_rate_limiter(self, client: TMDBClient, monkeypatch) -> None:
+        """A retry -- typically after a 429 -- used to skip the pacer entirely."""
+        respx.get("https://api.themoviedb.org/3/movie/550").mock(
+            side_effect=[httpx.Response(429), httpx.Response(503), httpx.Response(200, json={"id": 550})]
+        )
+        acquired: list[int] = []
+        monkeypatch.setattr(client.bucket, "acquire", lambda: acquired.append(1))
+        with patch("time.sleep"):
+            client.get("/movie/550", auth=False)
+        assert len(acquired) == 3
+
+    @respx.mock
+    def test_a_reset_connection_is_retried(self, client: TMDBClient) -> None:
+        """Only ConnectError and timeouts were retried; a reset mid-response failed outright."""
+        route = respx.get("https://api.themoviedb.org/3/movie/550").mock(
+            side_effect=[
+                httpx.ReadError("connection reset"),
+                httpx.RemoteProtocolError("server disconnected"),
+                httpx.Response(200, json={"id": 550}),
+            ]
+        )
+        with patch("time.sleep"):
+            resp = client.get("/movie/550", auth=False)
+        assert resp.status_code == 200
+        assert len(route.calls) == 3
 
     @respx.mock
     def test_session_valid(self, client: TMDBClient) -> None:

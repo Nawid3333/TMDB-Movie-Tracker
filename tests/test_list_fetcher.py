@@ -49,6 +49,23 @@ class TestFetchList:
         assert session_route.called
         assert incomplete is False
 
+    @respx.mock
+    def test_a_failed_page_is_logged_without_the_api_key(
+        self, tmp_project: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The first, unauthenticated try at a private list fails on every fetch.
+
+        Its error was logged with httpx's own message, which quotes the URL --
+        so every startup probe of a private list printed the API key.
+        """
+        respx.get("https://api.themoviedb.org/3/list/42").mock(return_value=httpx.Response(401, json={}))
+        caplog.set_level("DEBUG", logger="src")
+        with TMDBClient(api_key="SECRETKEY123") as secret_client:
+            items, incomplete = fetch_list(secret_client, "42", use_session_on_private=False)
+        assert (items, incomplete) == ([], True)
+        assert "HTTP 401 for GET /3/list/42" in caplog.text
+        assert "SECRETKEY123" not in caplog.text
+
 
 class TestLoadCachedList:
     def test_returns_none_when_missing(self, tmp_project: Path) -> None:

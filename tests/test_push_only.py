@@ -1,4 +1,10 @@
-"""Tests for the push-only URL file menu option."""
+"""Tests for the push-only URL file menu option.
+
+Every input feed is a finite list: a prompt that asks more often than a test
+expects fails it (StopIteration) instead of looping forever.
+"""
+
+from unittest import mock
 
 import httpx
 import respx
@@ -43,7 +49,7 @@ class TestPushUrlFileOnly:
             side_effect=lambda request: httpx.Response(200, json={"status_code": 12})
         )
 
-        monkeypatch.setattr("builtins.input", lambda prompt="": str(source))
+        monkeypatch.setattr("builtins.input", mock.Mock(side_effect=[str(source)]))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
         monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
 
@@ -111,7 +117,7 @@ class TestPushUrlFileOnly:
 
         respx.post("https://api.themoviedb.org/3/list/8678795/add_item").mock(side_effect=respond)
 
-        monkeypatch.setattr("builtins.input", lambda prompt="": str(source))
+        monkeypatch.setattr("builtins.input", mock.Mock(side_effect=[str(source)]))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
         monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
 
@@ -122,6 +128,52 @@ class TestPushUrlFileOnly:
         captured = capsys.readouterr()
         assert "Pushed 2 movie(s): 0 ok, 1 already present, 1 failed" in captured.out
 
+    @respx.mock
+    def test_a_non_json_error_page_fails_one_push_not_the_batch(
+        self, tmp_path, tmp_project, client, monkeypatch, capsys
+    ):
+        """An HTML 403 used to raise JSONDecodeError out of the push loop: no
+        further pushes and no summary of what had already gone through."""
+        from main import run_push_url_file_only
+
+        source = tmp_path / "push_urls.txt"
+        source.write_text("550\n551\n", encoding="utf-8")
+        for movie_id, title in ((550, "Fight Club"), (551, "The Crying Game")):
+            respx.get(f"https://api.themoviedb.org/3/movie/{movie_id}").mock(
+                return_value=httpx.Response(200, json={"id": movie_id, "title": title})
+            )
+        respx.get("https://api.themoviedb.org/3/list/8678795").mock(
+            return_value=httpx.Response(200, json={"id": 8678795, "item_count": 0, "items": [], "total_pages": 1})
+        )
+        respx.post("https://api.themoviedb.org/3/list/8678795/add_item").mock(
+            side_effect=[
+                httpx.Response(403, text="<html>403 Forbidden</html>", headers={"content-type": "text/html"}),
+                httpx.Response(200, json={"status_code": 12}),
+            ]
+        )
+        monkeypatch.setattr("builtins.input", mock.Mock(side_effect=[str(source)]))
+        monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt: True)
+        monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
+        client.session_id = "fake_session"
+
+        run_push_url_file_only(client)
+
+        assert "Pushed 2 movie(s): 1 ok, 0 already present, 1 failed" in capsys.readouterr().out
+
+    @respx.mock
+    def test_a_single_id_tmdb_does_not_have_says_why(self, tmp_project, client, monkeypatch, capsys):
+        """It used to say "Not a valid TMDB/IMDb URL or id" for any failure, a valid id included."""
+        from main import run_push_url_file_only
+
+        respx.get("https://api.themoviedb.org/3/movie/999999999").mock(return_value=httpx.Response(404))
+        monkeypatch.setattr("builtins.input", mock.Mock(side_effect=["999999999"]))
+        monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
+        client.session_id = "fake_session"
+
+        run_push_url_file_only(client)
+
+        assert "Could not resolve 999999999: not found on TMDB" in capsys.readouterr().out
+
     def test_skips_without_session(self, tmp_path, tmp_project, client, monkeypatch, capsys):
         """Without a TMDB session the option exits early."""
         from main import run_push_url_file_only
@@ -130,7 +182,7 @@ class TestPushUrlFileOnly:
         source.write_text("550\n", encoding="utf-8")
         client.session_id = ""
 
-        monkeypatch.setattr("builtins.input", lambda prompt="": str(source))
+        monkeypatch.setattr("builtins.input", mock.Mock(side_effect=[str(source)]))
         monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
 
         run_push_url_file_only(client)
@@ -163,7 +215,7 @@ class TestPushUrlFileOnly:
         )
         route = respx.post("https://api.themoviedb.org/3/list/8678795/add_item")
 
-        monkeypatch.setattr("builtins.input", lambda prompt="": str(source))
+        monkeypatch.setattr("builtins.input", mock.Mock(side_effect=[str(source)]))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: False)
         monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
 
@@ -200,7 +252,7 @@ class TestPushUrlFileOnly:
             confirmed_with.append(prompt)
             return True
 
-        monkeypatch.setattr("builtins.input", lambda prompt="": str(source))
+        monkeypatch.setattr("builtins.input", mock.Mock(side_effect=[str(source)]))
         monkeypatch.setattr("src.ui.prompts.confirm", fake_confirm)
         monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
         # Hyperlink escape codes only emit on a real terminal; force them on
@@ -250,7 +302,7 @@ class TestPushUrlFileOnly:
             side_effect=lambda request: httpx.Response(200, json={"status_code": 12})
         )
 
-        monkeypatch.setattr("builtins.input", lambda prompt="": str(source))
+        monkeypatch.setattr("builtins.input", mock.Mock(side_effect=[str(source)]))
         monkeypatch.setattr("src.ui.prompts.confirm", lambda prompt, default=False: True)
         monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
         monkeypatch.setattr("src.ui.term._COLOR", True)

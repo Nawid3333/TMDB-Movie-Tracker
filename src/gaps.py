@@ -1,57 +1,20 @@
-"""Franchise gap detection: connected movies and TV not in the index."""
+"""Franchise gap detection: films in your collections that are not in the index.
+
+Movies only. An earlier build also reported TV series that shared a keyword
+with an indexed film; that cluttered the report and is gone. Any
+"connected_tv" data still in details.json, and "connected_tv" / "shown_tv"
+in an older gaps.json, is ignored.
+"""
 
 import logging
-from collections import Counter
 from typing import Any
 
-from config.config import FRANCHISE_KEYWORD_MIN_MOVIES, GAPS_FILE
+from config.config import GAPS_FILE
 from src.atomic_io import atomic_write_json
 from src.index import load_details, load_index, now_iso
 from src.ui.reports import _is_upcoming
 
 logger = logging.getLogger(__name__)
-
-
-def _keyword_qualifies(
-    kw_name: str,
-    keyword_counts: Counter,
-    collection_tokens: set[frozenset[str]],
-    min_movies: int = FRANCHISE_KEYWORD_MIN_MOVIES,
-) -> bool:
-    """Return True when a keyword looks like a franchise anchor.
-
-    A keyword qualifies when it appears on at least ``min_movies`` indexed
-    movies, or when any significant token (>2 chars) overlaps with a
-    collection name in the index.
-    """
-    if keyword_counts.get(kw_name, 0) >= min_movies:
-        return True
-    lower = kw_name.lower()
-    kw_tokens = {t for t in lower.split() if len(t) > 2}
-    return any(kw_tokens & name_tokens for name_tokens in collection_tokens)
-
-
-def _normalized_keyword_counts(index: dict, details: dict) -> Counter:
-    """Count how many indexed movies carry each keyword name."""
-    counts: Counter = Counter()
-    for key in index.get("movies", {}):
-        detail = details.get("movies", {}).get(key, {})
-        for kw in detail.get("keywords", []):
-            if isinstance(kw, str):
-                counts[kw] += 1
-    return counts
-
-
-def _collection_name_tokens(index: dict, details: dict) -> set[frozenset[str]]:
-    """Return significant token sets for every collection name in the index."""
-    tokens: set[frozenset[str]] = set()
-    for key, membership in index.get("movies", {}).items():
-        detail = details.get("movies", {}).get(key, {})
-        collection = detail.get("collection") or membership.get("collection") or {}
-        name = (collection.get("name") or "").lower()
-        if name:
-            tokens.add(frozenset(t for t in name.split() if len(t) > 2))
-    return tokens
 
 
 def _find_missing_collection_parts(
@@ -96,48 +59,6 @@ def _find_missing_collection_parts(
     return missing
 
 
-def _find_connected_tv(
-    details: dict,
-    keyword_counts: Counter,
-    collection_tokens: set[frozenset[str]],
-) -> list[dict]:
-    """Return connected TV series that pass the keyword franchise filter.
-
-    Not filtered against the index: the index is movie-only, and TMDB numbers
-    TV series and movies from separate sequences. Checking a TV id against the
-    indexed movie ids hid any series whose id happened to equal an indexed
-    film's.
-    """
-    tv: list[dict] = []
-    seen_tv: set[int] = set()
-    for detail in details.get("movies", {}).values():
-        for item in detail.get("connected_tv", []):
-            if not isinstance(item, dict):
-                continue
-            tv_id = item.get("id")
-            via = item.get("via_keyword", "")
-            if not tv_id or not via:
-                continue
-            tv_id_int = int(tv_id)
-            if tv_id_int in seen_tv:
-                continue
-            if not _keyword_qualifies(via, keyword_counts, collection_tokens):
-                continue
-            seen_tv.add(tv_id_int)
-            first_air = item.get("first_air_date", "")
-            tv.append(
-                {
-                    "id": tv_id_int,
-                    "name": item.get("name", ""),
-                    "first_air_date": first_air,
-                    "upcoming": _is_upcoming(first_air),
-                    "via_keyword": via,
-                    "source": "keyword_tv",
-                }
-            )
-    return tv
-
-
 def _coerce_id_set(raw: Any) -> set[int]:
     """Return a set of ints from a JSON list, skipping unusable values."""
     ids: set[int] = set()
@@ -150,13 +71,9 @@ def _coerce_id_set(raw: Any) -> set[int]:
 
 
 def find_gaps(*, persist: bool = True) -> dict:
-    """Find connected films and TV series not yet in the index.
+    """Find the films of your movies' collections that are not yet in the index.
 
     Reads only the local index and details files; zero API calls.
-    Applies the keyword franchise heuristic from the design doc:
-    a keyword only qualifies if it appears on at least
-    FRANCHISE_KEYWORD_MIN_MOVIES films in the index, or its name shares
-    a significant token with a collection name of one of the indexed films.
 
     Every run is recomputed from the current index -- the previous report is
     never substituted for a fresh one. It is consulted only to flag each
@@ -169,33 +86,23 @@ def find_gaps(*, persist: bool = True) -> dict:
     details = load_details()
     indexed_ids = {int(k) for k in index.get("movies", {})}
 
-    keyword_counts = _normalized_keyword_counts(index, details)
-    collection_tokens = _collection_name_tokens(index, details)
-
     seen_ids: set[int] = set()
     missing_films = _find_missing_collection_parts(index, details, indexed_ids, seen_ids)
-    connected_tv = _find_connected_tv(details, keyword_counts, collection_tokens)
 
     # Oldest first; undated entries (unannounced sequels) go last, not first.
     missing_films.sort(key=lambda x: (not x.get("release_date"), x.get("release_date") or "", x.get("title", "")))
-    connected_tv.sort(key=lambda x: (not x.get("first_air_date"), x.get("first_air_date") or "", x.get("name", "")))
 
     previous = load_gaps()
     prev_film_ids = _coerce_id_set(previous.get("shown_films"))
-    prev_tv_ids = _coerce_id_set(previous.get("shown_tv"))
     for film in missing_films:
         film["is_new"] = film["id"] not in prev_film_ids
-    for show in connected_tv:
-        show["is_new"] = show["id"] not in prev_tv_ids
 
     result = {
         "missing_films": missing_films,
-        "connected_tv": connected_tv,
-        # Shown-sets snapshot exactly what this report contains, so the next
-        # run treats these ids as previously shown. Films that later get
-        # indexed simply vanish from both lists.
+        # The shown-set snapshots exactly what this report contains, so the
+        # next run treats these ids as previously shown. Films that later get
+        # indexed simply vanish from it.
         "shown_films": sorted(film["id"] for film in missing_films),
-        "shown_tv": sorted(show["id"] for show in connected_tv),
         "indexed_count": len(indexed_ids),
         "generated_at": now_iso(),
     }

@@ -55,11 +55,8 @@ def render_detail_card(membership: dict, detail: dict) -> None:
     if collection and collection.get("name"):
         lines.append(f"Collection: {collection['name']}")
 
-    connected_tv = detail.get("connected_tv", [])
-    if connected_tv:
-        lines.append("Connected TV:")
-        for item in connected_tv:
-            lines.append(f"  {item.get('name', '')} (via {item.get('via_keyword', '')})")
+    # Movies only: a "connected_tv" list left in details.json by an older
+    # build is not shown.
 
     overview = detail.get("overview")
     if overview:

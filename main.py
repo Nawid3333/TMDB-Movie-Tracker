@@ -1,6 +1,5 @@
 """TMDB Movie Tracker — terminal menu entry point."""
 
-import json
 import logging
 import os
 import shutil
@@ -18,6 +17,7 @@ from config.config import (
     ensure_env_file,
     setup_logging,
 )
+from src.atomic_io import atomic_write_bytes, atomic_write_json
 from src.changes import apply_changes, detect_changes
 from src.enrich import run_full_scan as enrich_run_full_scan
 from src.gaps import find_gaps
@@ -25,15 +25,15 @@ from src.index import load_index, now_iso, save_index
 from src.list_fetcher import ListFetchError, fetch_list
 from src.search import (
     SearchError,
+    is_movie_reference,
     push_to_tmdb_list,
     remove_from_tmdb_list,
-    resolve_movie_id_from_input,
     resolve_movie_ids_from_file,
+    resolve_movie_input,
 )
 from src.tmdb_api import TMDBClient, _TMDBClientLike
 from src.ui import prompts, reports, term
 from src.ui.reports import title_line, title_link, title_link_rows
-from src.ui.term import cinput as input
 from src.ui.term import cprint as print
 
 log = logging.getLogger(__name__)
@@ -141,7 +141,7 @@ def show_menu() -> None:
     print("  " + "─" * 52)
     print("  1. Full scan       — every detail (slow, accurate)")
     print("  2. Fast scan       — list membership only (quick)")
-    print("  3. Franchise gaps  — connected films and TV you missed")
+    print("  3. Franchise gaps  — films from your movies' collections you missed")
     print("  4. Push URL file   — push URLs/IDs to remote list without adding locally")
     print("  5. Force re-enrich — re-fetch every movie, ignoring freshness")
     print("  0. Exit")
@@ -168,7 +168,8 @@ def run_force_full_scan(client: TMDBClient) -> None:
     # menu. Cheap to confirm, expensive to trigger by accident.
     count = len(load_index().get("movies", {}))
     print(term.warn(f"  This re-fetches all {count} movie(s), ignoring freshness tiers."))
-    if not prompts.confirm("Re-fetch everything now?", default=False):
+    print(term.dim("  Movies marked gone are asked about again too; one TMDB still has is tracked again."))
+    if not prompts.confirm("Re-fetch everything now?"):
         print(term.dim("  Cancelled."))
         return
 
@@ -209,12 +210,12 @@ def run_fast_scan(client: TMDBClient) -> None:
     approve_additions = False
     if change_set.additions:
         titles = title_link_rows(change_set.additions.values())
-        approve_additions = prompts.confirm_category("Additions", titles, default=True)
+        approve_additions = prompts.confirm_category("Additions", titles)
 
     approve_removals = False
     if change_set.removals:
         titles = title_link_rows(change_set.removals.values())
-        approve_removals = prompts.confirm_category("Removals", titles, default=False)
+        approve_removals = prompts.confirm_category("Removals", titles)
 
     if not approve_additions and not approve_removals:
         print()
@@ -229,7 +230,7 @@ def run_fast_scan(client: TMDBClient) -> None:
     if change_set.removals:
         print(f"  - Removals:  {len(change_set.removals) if approve_removals else 0}")
 
-    if not prompts.confirm("Save these changes?", default=False):
+    if not prompts.confirm("Save these changes?"):
         print()
         print(term.warn("  ⚠ Changes discarded."))
         log.debug("Fast scan: user cancelled save")
@@ -261,10 +262,14 @@ def run_fast_scan(client: TMDBClient) -> None:
         print("    Removal proposals are blocked until a complete scan succeeds.")
 
     # Always show the mismatch counter after a fast scan.
-    _render_mismatch_summary(index, items, set())
+    _render_mismatch_summary(index, items, set(), incomplete=change_set.incomplete)
 
-    # Backend vanished cleanup: prompt when local movies are missing from the live list.
-    _prompt_clean_vanished(client, items, index, incomplete=incomplete)
+    # Backend vanished cleanup: prompt when local movies are missing from the
+    # live list. change_set.incomplete, not the raw fetch flag: it is also set
+    # when the shrink gate blocked removals, and passing the raw flag here
+    # offered to bulk-delete, one "y" away, the very movies the gate had just
+    # refused to propose -- right under "Removal proposals are blocked".
+    _prompt_clean_vanished(client, items, index, incomplete=change_set.incomplete)
 
 
 def _movie_only_ids(items: list[dict]) -> set[int]:
@@ -353,7 +358,7 @@ def _notify_non_movie_list_items(client: TMDBClient, items: list[dict]) -> None:
             )
             return
 
-        if not prompts.confirm("\nSet up TMDB v4 access now to enable removal?", default=False):
+        if not prompts.confirm("\nSet up TMDB v4 access now to enable removal?"):
             print(term.dim("  Open the link(s) above to verify, then remove by hand on TMDB if needed."))
             return
 
@@ -365,7 +370,7 @@ def _notify_non_movie_list_items(client: TMDBClient, items: list[dict]) -> None:
         # instructions still tell the user to persist it in .env themselves.
         _config.TMDB_V4_ACCESS_TOKEN = access_token
 
-    if not prompts.confirm(f"\nRemove these {len(non_movies)} item(s) from the TMDB list now?", default=False):
+    if not prompts.confirm(f"\nRemove these {len(non_movies)} item(s) from the TMDB list now?"):
         print(term.dim("  Left on the list -- open the link(s) above to verify by hand."))
         return
 
@@ -424,16 +429,16 @@ def _prompt_clean_vanished(
     for line in title_link_rows(local_movies.get(str(mid), {}) for mid in missing_ids):
         print(f"    - {line}")
 
-    # Anything but y or n walks the movies one at a time; say so, or that path
-    # (the only way to re-add a movie to the list) cannot be found.
-    bulk = (
-        input(
-            "\n"
-            + term.danger("Delete all these vanished entries?")
-            + term.dim(" (y = delete all, n = skip, Enter = decide one by one): ")
-        )
-        .strip()
-        .lower()
+    # Walking the movies one at a time is its own listed answer, o -- it is the
+    # only way to re-add a movie to the list, so it has to be findable. It
+    # used to be Enter, and so was every typo: "yy" walked the list instead of
+    # being asked again. Running out of answers keeps everything (n).
+    bulk = prompts.ask(
+        "\n"
+        + term.danger("Delete all these vanished entries?")
+        + term.dim(" (y = delete all, n = keep all, o = decide one by one): "),
+        ("y", "n", "o"),
+        safe="n",
     )
     if bulk == "y":
         removed = 0
@@ -458,7 +463,9 @@ def _prompt_clean_vanished(
         print("  1. " + term.danger("Delete from local index"))
         print("  2. Rescrape / re-add to TMDB list")
         print("  3. Skip")
-        choice = input("Choice (1/2/3): ").strip()
+        # A typo used to count as 3 without a word; it is asked again now,
+        # and only running out of answers skips (keeps) the movie.
+        choice = prompts.ask("Choice (1/2/3): ", ("1", "2", "3"), safe="3")
         if choice == "1":
             local_movies.pop(str(movie_id), None)
             removed += 1
@@ -492,7 +499,7 @@ def _prompt_clean_vanished(
         save_index(index)
         print(f"  Re-add result: {ok} ok, {failed} failed")
 
-        if prompts.confirm("\nVerify against the live TMDB list now?", default=True):
+        if prompts.confirm("\nVerify against the live TMDB list now?"):
             _fetch_and_summarize_mismatches(client, added_ids=set(rescrape_ids))
 
 
@@ -500,8 +507,16 @@ def _save_mismatch_report(
     index: dict,
     items: list[dict],
     added_ids: set[int],
+    *,
+    incomplete: bool = False,
 ) -> None:
-    """Write a mismatch report JSON, or remove it when no mismatch remains."""
+    """Write a mismatch report JSON, or remove it when no mismatch remains.
+
+    *incomplete* is recorded in the report. A movie on a list page that failed
+    to load looks exactly like one that left the list, so a report written
+    from a partial fetch listed those movies under missing_from_list with
+    nothing to say the list behind it was short.
+    """
     live_ids = _movie_only_ids(items)
     local_movies = index.get("movies", {})
     local_ids = {int(mid) for mid in local_movies}
@@ -522,6 +537,9 @@ def _save_mismatch_report(
     report = {
         "generated_at": datetime.now(UTC).isoformat(),
         "list_id": _config.TMDB_LIST_ID,
+        # True: the list fetch was partial (or failed the shrink gate), so
+        # missing_from_list may hold movies that are still on the list.
+        "incomplete": incomplete,
         "index_total": len(local_ids),
         "list_total": len(live_ids),
         "matched": len(local_ids & live_ids),
@@ -550,9 +568,9 @@ def _save_mismatch_report(
     }
 
     try:
-        MISMATCH_REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(MISMATCH_REPORT_FILE, "w", encoding="utf-8") as fh:
-            json.dump(report, fh, indent=2, ensure_ascii=False)
+        # Atomic like every other data file; no .bak generations, the report
+        # is rebuilt from scratch on every scan.
+        atomic_write_json(MISMATCH_REPORT_FILE, report, backup=False)
         log.debug(
             "Mismatch report saved: %d missing, %d extra, %d non-movie",
             len(missing_ids),
@@ -567,9 +585,11 @@ def _render_mismatch_summary(
     index: dict,
     items: list[dict],
     added_ids: set[int],
+    *,
+    incomplete: bool = False,
 ) -> None:
     """Compare local index against the live TMDB list and print a mismatch counter."""
-    _save_mismatch_report(index, items, added_ids)
+    _save_mismatch_report(index, items, added_ids, incomplete=incomplete)
 
     live_ids = _movie_only_ids(items)
     local_ids = {int(mid) for mid in index.get("movies", {})}
@@ -598,6 +618,8 @@ def _render_mismatch_summary(
 
     if missing_from_list and not added_ids:
         print(term.warn("\n⚠ Some local movies are not on the remote list."))
+    if incomplete:
+        print(term.warn("  ⚠ List fetch was incomplete; movies counted missing may still be on the list."))
 
 
 def _compare_text(count: int, idx_count: int) -> str:
@@ -642,7 +664,7 @@ def _probe_tmdb_status(client: TMDBClient, index: dict) -> None:
 
     _notify_non_movie_list_items(client, items)
 
-    _save_mismatch_report(index, items, set())
+    _save_mismatch_report(index, items, set(), incomplete=incomplete)
 
 
 def _fetch_and_summarize_mismatches(client: TMDBClient, *, added_ids: set[int] | None = None) -> None:
@@ -657,26 +679,51 @@ def _fetch_and_summarize_mismatches(client: TMDBClient, *, added_ids: set[int] |
         return
 
     index = load_index()
-    _render_mismatch_summary(index, items, added_ids)
-    if incomplete:
-        print(term.warn("  ⚠ List fetch was incomplete; mismatch counts may be low."))
+    _render_mismatch_summary(index, items, added_ids, incomplete=incomplete)
 
     _notify_non_movie_list_items(client, items)
 
 
-def _select_batch_source() -> str:
-    """Prompt for a batch source, defaulting to the configured file."""
+def _select_batch_source() -> tuple[str, str] | None:
+    """Ask where the movies to push come from.
+
+    Returns ("file", path), ("single", url_or_id), or None to go back.
+
+    No default and no dead end: Enter used to mean the default file, and an
+    answer that was neither an existing file nor a movie URL went on to an
+    API lookup and then back to the main menu. The default file is its own
+    listed answer now -- 1, as in the scrapers -- and anything unusable is
+    asked again; only 0, end of input, or MAX_UNRECOGNIZED bad answers go
+    back. A bare 1 is therefore never TMDB id 1 here (the prompt says so);
+    every other number still is.
+    """
     default = str(DEFAULT_BATCH_FILE)
-    print("  • Paste a TMDB/IMDb URL or raw id → add a single movie")
-    print("  • Enter filename → use that file")
-    print(f"  • Press Enter → use default ({default})")
+    default_name = os.path.basename(default)
+    print("  • Paste a TMDB/IMDb URL or raw id → push a single movie")
+    print("  • Type a filename → use that file")
+    print(f"  • Type 1 → use the default file ({default})")
     print("  • Type 0 → back to main menu")
-    user_input = input(f"\nEnter [default: {default}]: ").strip()
-    if user_input == "0":
-        return ""
-    if not user_input:
-        return default
-    return user_input
+    for _ in range(prompts.MAX_UNRECOGNIZED):
+        answer = prompts.read_line(f"\n1 = {default_name}, 0 = back, or a TMDB/IMDb URL / id / filename: ")
+        if answer is None or answer == "0":
+            return None
+        if answer == "1":
+            if os.path.isfile(default):
+                return ("file", default)
+            print(f"  ⚠ The default file does not exist: {default} - try again, or 0 to go back.")
+            continue
+        if not answer:
+            print("  ⚠ No answer - type 1, 0, a TMDB/IMDb URL or id, or a filename.")
+        elif os.path.isdir(answer):
+            print(f"  ⚠ That is a directory: {answer} - type a file name, or 0 to go back.")
+        elif os.path.exists(answer):
+            return ("file", answer)
+        elif is_movie_reference(answer):
+            return ("single", answer)
+        else:
+            print(f"  ⚠ No such file, and not a TMDB/IMDb URL or id: {answer} - try again, or 0 to go back.")
+    print(f"  ⚠ No usable answer after {prompts.MAX_UNRECOGNIZED} tries; back to the main menu.")
+    return None
 
 
 def run_push_url_file_only(client: TMDBClient) -> None:
@@ -698,32 +745,30 @@ def run_push_url_file_only(client: TMDBClient) -> None:
         return
 
     source = _select_batch_source()
-    if not source:
+    if source is None:
         print("  → Cancelled")
         return
 
     records: list[dict] = []
     skipped: list[tuple[int, str, str]] = []
 
-    if os.path.exists(source):
-        if os.path.isdir(source):
-            print(term.err(f"✗ Path is a directory: {source}"))
-            return
+    kind, value = source
+    if kind == "file":
         try:
-            records, skipped = resolve_movie_ids_from_file(client, source)
+            records, skipped = resolve_movie_ids_from_file(client, value)
         except SearchError as exc:
             log.error("Failed to read URL file: %s", exc)
             print(term.err(f"✗ Failed to read file: {exc}"))
             return
     else:
-        single = resolve_movie_id_from_input(client, source)
+        single, reason = resolve_movie_input(client, value)
         if single is None:
-            print(term.err(f"✗ Not a valid TMDB/IMDb URL or id: {source}"))
+            print(term.err(f"✗ Could not resolve {value}: {reason}"))
             return
         records = [single]
 
     if skipped:
-        print(term.warn(f"\n⚠ Skipped {len(skipped)} invalid line(s):"))
+        print(term.warn(f"\n⚠ Skipped {len(skipped)} line(s):"))
         for line_num, raw, reason in skipped:
             print(f"  Line {line_num}: {raw[:80]!r} — {reason}")
 
@@ -766,7 +811,7 @@ def run_push_url_file_only(client: TMDBClient) -> None:
     for line in title_link_rows(to_push):
         print(f"  + {line}")
 
-    if not prompts.confirm(f"\nPush these {len(to_push)} movie(s) to remote list {remote_list_id}?", default=False):
+    if not prompts.confirm(f"\nPush these {len(to_push)} movie(s) to remote list {remote_list_id}?"):
         print("  → Cancelled")
         return
 
@@ -821,11 +866,8 @@ def run_clean_vanished(client: TMDBClient) -> None:
 
 
 def _gap_url(item: dict) -> str:
-    """Return the TMDB link for a gap entry (movie or connected TV)."""
-    item_id = item.get("id")
-    if item.get("source") == "keyword_tv":
-        return f"https://www.themoviedb.org/tv/{item_id}"
-    return f"https://www.themoviedb.org/movie/{item_id}"
+    """Return the TMDB link for a gap entry -- always a movie page."""
+    return f"https://www.themoviedb.org/movie/{item.get('id')}"
 
 
 def _write_gaps_export(gaps: dict) -> str:
@@ -869,10 +911,12 @@ def _write_gaps_export(gaps: dict) -> str:
         lines.extend(_entry(item) for item in prev_items)
         lines.append("")
 
+    # Atomic: this file doubles as a push queue, and writing it in place left
+    # a truncated queue behind when a run stopped mid-write. os.linesep keeps
+    # the line endings a text-mode write produced.
+    text = "\n".join(lines).rstrip("\n") + "\n"
     try:
-        os.makedirs(os.path.dirname(target_path) or ".", exist_ok=True)
-        with open(target_path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines).rstrip("\n") + "\n")
+        atomic_write_bytes(target_path, text.replace("\n", os.linesep).encode("utf-8"))
     except OSError as exc:
         log.error("Could not write gaps export %s: %s", target_path, exc)
         print(term.err(f"  ✗ Could not write {target_path}: {exc}"))
@@ -880,10 +924,12 @@ def _write_gaps_export(gaps: dict) -> str:
 
 
 def run_franchise_gaps(_client: _TMDBClientLike) -> None:
-    """Report connected films and TV not in the index.
+    """Report the films of your movies' collections that are not in the index.
 
     Always recomputed from the current index; the last persisted report is
     only consulted to separate new findings from previously shown ones.
+    Movies only: the connected-TV section was dropped -- it cluttered the
+    report, and this tracker is for movies.
     """
     log.debug("Franchise gaps selected")
     print()
@@ -927,22 +973,6 @@ def run_franchise_gaps(_client: _TMDBClientLike) -> None:
         print()
         print(term.dim(f"Previously shown: {len(prev_films)}"))
         _print_gap_table(prev_films)
-
-    tv = gaps.get("connected_tv", [])
-    new_tv = [t for t in tv if t.get("is_new")]
-    prev_tv = [t for t in tv if not t.get("is_new")]
-    if tv:
-        print()
-        print(term.bold(f"Connected TV series: {len(tv)} ({len(new_tv)} new)"))
-        if new_tv:
-            _print_gap_table(new_tv)
-        if prev_tv:
-            print()
-            print(term.dim(f"Previously shown: {len(prev_tv)}"))
-            _print_gap_table(prev_tv)
-    else:
-        print()
-        print(term.ok("  ✓ No connected TV series."))
 
     # The URL export is rewritten fresh on every run, new items on top.
     export_path = _write_gaps_export(gaps)
@@ -1001,9 +1031,11 @@ def main() -> None:
 
         while True:
             show_menu()
+            # A typo is asked again; end of input, or a run of unusable
+            # answers, exits (0) instead of looping on the menu forever.
             try:
-                choice = input("Enter your choice (0-5): ").strip()
-            except (EOFError, KeyboardInterrupt):
+                choice = prompts.ask("Enter your choice (0-5): ", ("0", *actions), safe="0")
+            except KeyboardInterrupt:
                 print()
                 log.info("Goodbye!")
                 break
@@ -1014,17 +1046,13 @@ def main() -> None:
                 log.debug("Goodbye!")
                 break
 
-            action = actions.get(choice)
-            if action is None:
-                print(term.err("✗ Invalid choice."), "Please enter a number between 0 and 5.")
-                continue
-
+            action = actions[choice]
             try:
                 action(client)
             except KeyboardInterrupt:
                 print()
                 log.warning("Option %s interrupted by the user", choice)
-                print(term.warn("  ⚠ Stopped."), "Any partly written data has been discarded.")
+                print(term.warn("  ⚠ Stopped."), "Work already saved is kept; anything unfinished was discarded.")
             except Exception as exc:
                 log.error("Option %s failed: %s", choice, exc, exc_info=True)
                 print()

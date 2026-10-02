@@ -116,6 +116,56 @@ class TestMismatchReportIgnoresNonMovies:
         assert "Extra on list (on site, not in index):     0" in printed
 
 
+class TestMismatchReportFromAPartialFetch:
+    """A movie on a page that failed to load looks exactly like one that left the list."""
+
+    def test_the_report_says_the_fetch_was_incomplete(self, _movie_index, tmp_path, monkeypatch, capsys):
+        report_path = tmp_path / "mismatch_report.json"
+        monkeypatch.setattr(main, "MISMATCH_REPORT_FILE", report_path)
+
+        main._render_mismatch_summary(_movie_index, [], set(), incomplete=True)
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert report["incomplete"] is True
+        assert report["missing_from_list_count"] == 1
+        assert "may still be on the list" in capsys.readouterr().out
+
+    def test_a_complete_fetch_says_so_too(self, _movie_index, tmp_path, monkeypatch):
+        report_path = tmp_path / "mismatch_report.json"
+        monkeypatch.setattr(main, "MISMATCH_REPORT_FILE", report_path)
+
+        main._save_mismatch_report(_movie_index, [], set())
+
+        assert json.loads(report_path.read_text(encoding="utf-8"))["incomplete"] is False
+
+    def test_the_startup_probe_passes_its_incomplete_flag_on(self, _movie_index, tmp_path, monkeypatch, capsys):
+        report_path = tmp_path / "mismatch_report.json"
+        monkeypatch.setattr(main, "MISMATCH_REPORT_FILE", report_path)
+        monkeypatch.setattr(main._config, "TMDB_LIST_ID", "8678795")
+        monkeypatch.setattr(main, "fetch_list", lambda *a, **k: ([], True))
+
+        main._probe_tmdb_status(_fake_client(session_id=None), _movie_index)
+
+        assert json.loads(report_path.read_text(encoding="utf-8"))["incomplete"] is True
+
+    def test_the_report_is_written_atomically(self, _movie_index, tmp_path, monkeypatch):
+        """It was opened with "w" in place: a failed write left a truncated report."""
+        report_path = tmp_path / "mismatch_report.json"
+        report_path.write_text('{"previous": true}', encoding="utf-8")
+        monkeypatch.setattr(main, "MISMATCH_REPORT_FILE", report_path)
+        monkeypatch.setattr("src.atomic_io.json.dump", _dump_half_then_fail)
+
+        main._save_mismatch_report(_movie_index, [], set())
+
+        assert json.loads(report_path.read_text(encoding="utf-8")) == {"previous": True}
+        assert not list(tmp_path.glob("*.tmp"))
+
+
+def _dump_half_then_fail(data, fh, **kwargs) -> None:
+    fh.write('{"generated_at": ')
+    raise OSError("disk full")
+
+
 class TestNonMovieItems:
     def test_normalizes_id_title_and_link_by_media_type(self):
         items = [

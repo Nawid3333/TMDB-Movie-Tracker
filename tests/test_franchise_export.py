@@ -15,6 +15,10 @@ class _FakeClient:
         return None
 
 
+def _refuse_replace(src, dst) -> None:
+    raise OSError("disk full")
+
+
 class TestFranchiseGapsExport:
     """Coverage for the always-fresh, two-section export in run_franchise_gaps."""
 
@@ -49,6 +53,32 @@ class TestFranchiseGapsExport:
             }
         )
         return find_gaps(persist=False)
+
+    def test_no_tv_series_in_the_report_or_the_export(self, gaps_fixture, tmp_project, capsys):
+        """Movies only, even with connected TV left in details.json by an older build.
+
+        The export doubles as a push queue, so a TV URL in it would be pushed
+        to the list as if it were a movie id.
+        """
+        import config.config as _config
+        from main import run_franchise_gaps
+        from src.index import load_details
+
+        details = load_details()
+        details["movies"]["1"]["connected_tv"] = [
+            {"id": 1399, "name": "Some Series", "first_air_date": "2020-01-01", "via_keyword": "Franchise"}
+        ]
+        save_details(details)
+
+        run_franchise_gaps(_FakeClient())
+
+        printed = capsys.readouterr().out
+        export = _config.FRANCHISE_GAPS_EXPORT_FILE.read_text(encoding="utf-8")
+        for text in (printed, export):
+            assert "Some Series" not in text
+            assert "/tv/" not in text
+            assert "Connected TV" not in text
+        assert "https://www.themoviedb.org/movie/2" in export
 
     def test_export_written_without_prompts(self, gaps_fixture, tmp_project):
         """The export file is written on every run without asking."""
@@ -97,6 +127,21 @@ class TestFranchiseGapsExport:
         assert "https://www.themoviedb.org/movie/999" not in text
         assert text.startswith("# Franchise gaps export")
         assert "movie/2" in text
+
+    def test_a_failed_rewrite_keeps_the_previous_export(self, gaps_fixture, tmp_project, monkeypatch):
+        """The file doubles as a push queue; it was rewritten in place, so a
+        write that stopped half way left a truncated queue behind."""
+        import config.config as _config
+        from main import run_franchise_gaps
+
+        target = _config.FRANCHISE_GAPS_EXPORT_FILE
+        target.write_text("https://www.themoviedb.org/movie/7\n", encoding="utf-8")
+        monkeypatch.setattr("src.atomic_io.os.replace", _refuse_replace)
+
+        run_franchise_gaps(_FakeClient())
+
+        assert target.read_text(encoding="utf-8") == "https://www.themoviedb.org/movie/7\n"
+        assert not list(target.parent.glob("*.tmp"))
 
     def test_export_includes_titles_as_comments(self, gaps_fixture, tmp_project):
         """Each URL line carries its title so links can be read at a glance."""

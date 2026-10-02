@@ -1,10 +1,12 @@
-"""Durable atomic JSON writes, shared by every persisted file in this project."""
+"""Durable atomic writes, shared by every persisted file in this project."""
 
 import contextlib
 import json
 import logging
 import os
 import tempfile
+from collections.abc import Callable
+from typing import IO, Any
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +43,41 @@ def atomic_write_json(filepath, data, *, indent: int | None = 2, backup: bool = 
     rename can land while the data is still sitting in the page cache,
     leaving a file that atomically points at nothing useful. The
     flush()+fsync() below close that gap. Shared by every JSON writer in
-    this project (index, details, session, collection cache, keyword TV
-    cache, gaps, enrichment checkpoint) so the durability behaviour can't
-    drift between call sites.
+    this project (index, details, gaps, enrichment checkpoint, list cache,
+    mismatch report) so the durability
+    behaviour can't drift between call sites.
 
     A unique mkstemp() name (rather than a fixed "<file>.tmp") avoids
     collisions if two runs ever write the same file concurrently, and the
     except-branch cleanup means a failed write never leaves an orphaned
     temp file behind.
     """
+
+    def _dump(f: IO[Any]) -> None:
+        json.dump(data, f, indent=indent, ensure_ascii=False)
+
+    _atomic_write(filepath, _dump, binary=False, backup=backup)
+
+
+def atomic_write_bytes(filepath, data: bytes, *, backup: bool = False) -> None:
+    """Write raw bytes atomically, the same way atomic_write_json writes JSON.
+
+    For the files that are not JSON: the franchise-gaps URL export (encoded
+    text) and cached posters. Both used to be written straight into place, so
+    a run stopped mid-write left a truncated file under the final name -- and
+    a truncated poster was then kept forever, because the cache only checks
+    that the file exists. No backup by default: neither file is the only
+    copy of anything.
+    """
+
+    def _write(f: IO[Any]) -> None:
+        f.write(data)
+
+    _atomic_write(filepath, _write, binary=True, backup=backup)
+
+
+def _atomic_write(filepath, write: Callable[[IO[Any]], None], *, binary: bool, backup: bool) -> None:
+    """Temp file + fsync + os.replace, with .bak rotation; see atomic_write_json."""
     dirpath = os.path.dirname(filepath)
     if not dirpath:
         dirpath = os.getcwd()
@@ -58,8 +86,8 @@ def atomic_write_json(filepath, data, *, indent: int | None = 2, backup: bool = 
 
     fd, tmp_path = tempfile.mkstemp(dir=dirpath, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=indent, ensure_ascii=False)
+        with os.fdopen(fd, "wb") if binary else os.fdopen(fd, "w", encoding="utf-8") as f:
+            write(f)
             f.flush()
             os.fsync(f.fileno())
         # The new file is already on disk and fsynced, so the outgoing file

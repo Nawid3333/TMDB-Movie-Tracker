@@ -42,7 +42,6 @@ MOVIE = {
         "cast": [{"id": 109, "name": "Elijah Wood", "character": "Frodo", "order": 0}],
         "crew": [{"id": 108, "name": "Peter Jackson", "job": "Director", "department": "Directing"}],
     },
-    "keywords": {"keywords": [{"id": 818, "name": "based on novel or book"}]},
     "external_ids": {"imdb_id": "tt0120737"},
     "release_dates": {
         "results": [{"iso_3166_1": "DE", "release_dates": [{"certification": "12", "release_date": "2001-12-19"}]}]
@@ -154,10 +153,11 @@ class TestApiChanges:
         assert_only_failure(results, "movie details")
         assert "Director" in results["movie details"].detail
 
-    def test_keywords_in_a_new_shape(self) -> None:
-        results = run(FakeTmdb({(API, "/3/movie/120"): movie_with(keywords=[{"name": "novel"}])}))
-        assert_only_failure(results, "movie details")
-        assert "franchises" in results["movie details"].detail
+    def test_keywords_are_no_longer_checked(self) -> None:
+        """They only ever fed the connected-TV lookup, which is gone; the tracker no longer asks for them."""
+        _status, body = movie_with(keywords=[{"name": "novel"}])
+        assert site_check.movie_field_problems(body) == []
+        assert "keywords" not in site_check.enrich._APPEND_TO_RESPONSE.split(",")
 
     def test_release_dates_with_no_certification_to_pick(self) -> None:
         dates = {"results": [{"iso_3166_1": "DE", "dates": [{"cert": "12"}]}]}

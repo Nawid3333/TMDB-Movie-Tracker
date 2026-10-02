@@ -1,9 +1,11 @@
 """Tests for src.gaps."""
 
+import json
 import time
 
 import pytest
 
+import config.config as _config
 from src.gaps import find_gaps, load_gaps
 from src.index import save_details, save_index
 from src.ui.reports import _is_upcoming
@@ -89,65 +91,68 @@ class TestFindGaps:
         gaps = find_gaps()
         assert [film["id"] for film in gaps["missing_films"]] == [4, 3, 2]
 
-    def test_keyword_tv_qualifies(self, tmp_project) -> None:
-        save_index(
-            {
-                "list_id": 8678795,
-                "movies": {
-                    "1": {"id": 1, "title": "A", "collection": {"id": 5, "name": "Shared Name"}},
-                    "2": {"id": 2, "title": "B"},
-                },
-            }
-        )
-        save_details(
-            {
-                "movies": {
-                    "1": {"id": 1, "keywords": ["Shared Name"]},
-                    "2": {"id": 2, "keywords": ["Shared Name"]},
-                }
-            }
-        )
-        gaps = find_gaps()
-        assert gaps["indexed_count"] == 2
-
-    def test_tv_id_equal_to_an_indexed_movie_id_is_still_reported(self, tmp_project) -> None:
-        """TMDB numbers TV series and movies separately; the index is movie-only.
-
-        TV series 100 and movie 100 are unrelated titles, so indexing the
-        movie must not hide the series. This used to be asserted the other way
-        round, and passed only because the keyword never reached the
-        franchise threshold.
-        """
-        save_index(
-            {
-                "list_id": 8678795,
-                "movies": {
-                    "1": {"id": 1, "title": "A"},
-                    "100": {"id": 100, "title": "Unrelated Film"},
-                },
-            }
-        )
+    def test_connected_tv_left_in_details_never_reaches_the_report(self, tmp_project) -> None:
+        """Movies only. An older build stored keyword-connected TV series per movie
+        and reported them; that data may still be in details.json and is ignored."""
+        save_index({"list_id": 8678795, "movies": {"1": {"id": 1, "title": "A"}}})
         save_details(
             {
                 "movies": {
                     "1": {
                         "id": 1,
                         "keywords": ["Shared Name"],
+                        "collection": {
+                            "id": 10,
+                            "name": "Franchise",
+                            "parts": [{"id": 2, "title": "Missing", "release_date": "2021-01-01"}],
+                        },
                         "connected_tv": [
-                            {
-                                "id": 100,
-                                "name": "Some Series",
-                                "first_air_date": "2020-01-01",
-                                "via_keyword": "Shared Name",
-                            }
+                            {"id": 500, "name": "Some Series", "first_air_date": "2020-01-01", "via_keyword": "x"}
                         ],
-                    },
-                    "100": {"id": 100, "keywords": ["Shared Name"]},
+                    }
                 }
             }
         )
         gaps = find_gaps()
-        assert [show["name"] for show in gaps["connected_tv"]] == ["Some Series"]
+        assert [film["id"] for film in gaps["missing_films"]] == [2]
+        assert all(film["source"] == "collection" for film in gaps["missing_films"])
+        assert "connected_tv" not in gaps
+        assert "shown_tv" not in gaps
+        assert "Some Series" not in json.dumps(load_gaps())
+
+    def test_an_old_state_file_with_shown_tv_still_loads(self, tmp_project) -> None:
+        """A gaps.json written while TV was still reported must not break the next run."""
+        save_index({"list_id": 8678795, "movies": {"1": {"id": 1, "title": "A"}}})
+        save_details(
+            {
+                "movies": {
+                    "1": {
+                        "id": 1,
+                        "collection": {
+                            "id": 10,
+                            "name": "Franchise",
+                            "parts": [{"id": 2, "title": "Missing", "release_date": "2021-01-01"}],
+                        },
+                    }
+                }
+            }
+        )
+        _config.GAPS_FILE.write_text(
+            json.dumps(
+                {
+                    "missing_films": [],
+                    "connected_tv": [{"id": 500, "name": "Some Series", "source": "keyword_tv"}],
+                    "shown_films": [2],
+                    "shown_tv": [500],
+                }
+            ),
+            encoding="utf-8",
+        )
+        gaps = find_gaps()
+        assert gaps["missing_films"][0]["is_new"] is False
+        saved = load_gaps()
+        assert "shown_tv" not in saved
+        assert "connected_tv" not in saved
 
     def test_first_run_flags_everything_new(self, tmp_project) -> None:
         """With no prior report, every found gap is marked as new."""
@@ -409,7 +414,8 @@ class TestGapBenchmarks:
 
     These tests use plain pytest + the standard library so they run without
     installing extra packages. They assert both a runtime ceiling and the
-    precision/recall of the two gap detectors against a known fixture.
+    precision/recall of the gap detector against a known fixture -- one that
+    still carries connected-TV data from an older build, which must be ignored.
     """
 
     @pytest.fixture
@@ -472,14 +478,13 @@ class TestGapBenchmarks:
                     "30": {
                         "id": 30,
                         "keywords": ["saga one", "saga two"],
-                        # No collection; keywords get boosted by other movies.
+                        # No collection, so it contributes no gaps.
                     },
                 }
             }
         )
         return {
             "expected_missing_ids": {11, 12, 21},
-            "expected_tv_ids": {100, 101},
             "indexed_count": 3,
         }
 
@@ -497,20 +502,18 @@ class TestGapBenchmarks:
         assert missing_ids == known_fixture["expected_missing_ids"]
         assert gaps["indexed_count"] == known_fixture["indexed_count"]
 
-    def test_connected_tv_detection_accuracy(self, known_fixture) -> None:
-        """All expected connected TV series are found and no extras."""
+    def test_no_tv_series_are_reported(self, known_fixture) -> None:
+        """The fixture's connected TV (ids 100, 101) is old data and stays out."""
         gaps = find_gaps()
-        tv_ids = {t["id"] for t in gaps["connected_tv"]}
-        assert tv_ids == known_fixture["expected_tv_ids"]
+        assert "connected_tv" not in gaps
+        assert {m["id"] for m in gaps["missing_films"]}.isdisjoint({100, 101})
 
     def test_precision_no_false_positives(self, known_fixture) -> None:
         """Indexed ids must never appear as gaps."""
         gaps = find_gaps()
         indexed_ids = {10, 20, 30}
         missing_ids = {m["id"] for m in gaps["missing_films"]}
-        tv_ids = {t["id"] for t in gaps["connected_tv"]}
         assert not (missing_ids & indexed_ids)
-        assert not (tv_ids & indexed_ids)
 
 
 class TestLoadGapsFreshness:

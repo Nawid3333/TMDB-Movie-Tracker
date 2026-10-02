@@ -13,7 +13,32 @@ from unittest import mock
 
 import pytest
 
-from src.atomic_io import _rotate_backups, atomic_write_json
+from src.atomic_io import _rotate_backups, atomic_write_bytes, atomic_write_json
+
+
+class TestAtomicWriteBytes:
+    """The non-JSON files -- posters and the gaps URL export -- go through the same writer."""
+
+    def test_writes_the_bytes_exactly(self, tmp_path: Path) -> None:
+        target = tmp_path / "poster.jpg"
+        atomic_write_bytes(target, b"\xff\xd8 jpeg \r\n bytes")
+        assert target.read_bytes() == b"\xff\xd8 jpeg \r\n bytes"
+        assert not any(tmp_path.glob("*.tmp"))
+
+    def test_no_backup_by_default(self, tmp_path: Path) -> None:
+        target = tmp_path / "poster.jpg"
+        target.write_bytes(b"old")
+        atomic_write_bytes(target, b"new")
+        assert target.read_bytes() == b"new"
+        assert not (tmp_path / "poster.jpg.bak1").exists()
+
+    def test_a_failed_rename_leaves_the_previous_file_and_no_temp(self, tmp_path: Path) -> None:
+        target = tmp_path / "export.txt"
+        target.write_bytes(b"previous")
+        with mock.patch("src.atomic_io.os.replace", side_effect=OSError("locked")), pytest.raises(OSError):
+            atomic_write_bytes(target, b"new")
+        assert target.read_bytes() == b"previous"
+        assert not any(tmp_path.glob("*.tmp"))
 
 
 class TestAtomicWriteJson:

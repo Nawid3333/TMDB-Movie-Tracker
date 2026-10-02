@@ -118,6 +118,29 @@ class TestIncompleteFetch:
         main.run_fast_scan(_client())
         assert calls == [{"incomplete": True}]
 
+    def test_the_shrink_gate_keeps_the_cleanup_from_offering_what_it_blocked(self, saved, monkeypatch, capsys):
+        """The fetch looked complete, but the list came back far smaller than the index.
+
+        detect_changes refuses to propose removals then (the shrink gate), and
+        the scan says so. The vanished cleanup that runs after it used to be
+        handed the raw fetch flag -- False here -- and offered to bulk-delete
+        those same movies: one "y" removed 7 of 10. Approving the one real
+        addition must not lead to any deletion prompt at all.
+        """
+        index = _index(*range(1, 11))
+        index["meta"] = {}
+        monkeypatch.setattr(main, "load_index", lambda: index)
+        monkeypatch.setattr(main, "fetch_list", lambda *a, **k: (_list(1, 2, 3, 99), False))
+        monkeypatch.setattr(main.prompts, "confirm_category", lambda *a, **k: True)
+        monkeypatch.setattr(main.prompts, "confirm", lambda *a, **k: True)
+        monkeypatch.setattr(main, "_render_mismatch_summary", lambda *a, **k: None)
+        _answer(monkeypatch)  # any prompt that reads input fails the test
+
+        main.run_fast_scan(_client())
+
+        assert [_kept(s) for s in saved] == [[*range(1, 11), 99]]
+        assert "Vanished cleanup is skipped" in capsys.readouterr().out
+
 
 class TestBulkAnswer:
     def test_yes_deletes_only_the_missing_movies(self, saved, monkeypatch):
@@ -132,24 +155,64 @@ class TestBulkAnswer:
         assert saved == []
         assert _kept(index) == [1, 2]
 
+    def test_a_typo_is_asked_again(self, saved, monkeypatch, capsys):
+        # "yy" used to fall through to the one-by-one walk.
+        asked = _answer(monkeypatch, "yy", "n")
+        main._prompt_clean_vanished(_client(), _list(1), _index(1, 2))
+        assert len(asked) == 2
+        assert saved == []
+        assert "'yy' is not an option" in capsys.readouterr().out
+
+    def test_enter_is_not_an_answer(self, saved, monkeypatch, capsys):
+        # Enter used to mean "decide one by one".
+        asked = _answer(monkeypatch, "", "n")
+        main._prompt_clean_vanished(_client(), _list(1), _index(1, 2))
+        assert len(asked) == 2
+        assert "Delete all these vanished entries?" in asked[1]
+        assert saved == []
+        assert "No answer" in capsys.readouterr().out
+
+    def test_end_of_input_keeps_everything(self, saved, monkeypatch):
+        def eof(prompt: str = "") -> str:
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", eof)
+        index = _index(1, 2)
+        main._prompt_clean_vanished(_client(), _list(1), index)
+        assert saved == []
+        assert _kept(index) == [1, 2]
+
 
 class TestOneByOne:
-    """Any other bulk answer walks the movies one at a time."""
+    """o walks the movies one at a time."""
 
     def test_only_the_movies_marked_for_deletion_go(self, saved, monkeypatch):
-        _answer(monkeypatch, "", "1", "3")
+        _answer(monkeypatch, "o", "1", "3")
         main._prompt_clean_vanished(_client(), _list(1), _index(1, 2, 3))
         assert [_kept(s) for s in saved] == [[1, 3]]
 
-    def test_enter_skips_and_saves_nothing(self, saved, monkeypatch):
-        _answer(monkeypatch, "", "", "")
+    def test_skipping_every_movie_saves_nothing(self, saved, monkeypatch):
+        _answer(monkeypatch, "o", "3", "3")
         main._prompt_clean_vanished(_client(), _list(1), _index(1, 2, 3))
+        assert saved == []
+
+    def test_a_typo_for_one_movie_is_asked_again(self, saved, monkeypatch):
+        # A typo used to skip the movie without a word.
+        asked = _answer(monkeypatch, "o", "x", "", "1")
+        main._prompt_clean_vanished(_client(), _list(1), _index(1, 2))
+        assert len(asked) == 4
+        assert [_kept(s) for s in saved] == [[1]]
+
+    def test_running_out_of_answers_skips_the_movie(self, saved, monkeypatch):
+        monkeypatch.setattr(main.prompts, "MAX_UNRECOGNIZED", 2)
+        _answer(monkeypatch, "o", "x", "x")
+        main._prompt_clean_vanished(_client(), _list(1), _index(1, 2))
         assert saved == []
 
     def test_re_add_without_a_session_pushes_nothing(self, saved, monkeypatch):
         pushed: list[tuple] = []
         monkeypatch.setattr(main, "push_to_tmdb_list", lambda *a: pushed.append(a) or {"success": True})
-        _answer(monkeypatch, "", "2")
+        _answer(monkeypatch, "o", "2")
         main._prompt_clean_vanished(_client(session_id=None), _list(1), _index(1, 2))
         assert pushed == []
         assert saved == []
@@ -157,7 +220,7 @@ class TestOneByOne:
     def test_re_add_pushes_the_chosen_movie_and_keeps_it(self, saved, monkeypatch):
         pushed: list[tuple] = []
         monkeypatch.setattr(main, "push_to_tmdb_list", lambda *a: pushed.append(a[1:]) or {"success": True})
-        _answer(monkeypatch, "", "2")
+        _answer(monkeypatch, "o", "2")
         main._prompt_clean_vanished(_client(), _list(1), _index(1, 2))
         assert pushed == [(LIST_ID, 2)]
         assert _kept(saved[-1]) == [1, 2]

@@ -68,3 +68,44 @@ print("BOOTSTRAP_REGRESSION_OK")
     )
     assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
     assert "BOOTSTRAP_REGRESSION_OK" in result.stdout
+
+
+def test_module_loggers_reach_the_log_file_and_stdout(tmp_path: Path) -> None:
+    """Every src module logs via getLogger(__name__) -- "src.enrich" and so on.
+
+    setup_logging() used to put its handlers on a logger named "movie_tracker",
+    which none of those descend from, so their records hit Python's last-resort
+    handler: warnings unformatted on stderr, INFO dropped, the log file empty.
+    Runs in a subprocess so the handlers it installs on the root logger do not
+    leak into the rest of the suite.
+    """
+    script = tmp_path / "check_logging.py"
+    script.write_text(
+        f"""
+import logging
+import sys
+sys.path.insert(0, {str(PROJECT_ROOT)!r})
+
+import config.config as cfg
+
+cfg.setup_logging()
+cfg.setup_logging()  # a second call must not add a second pair of handlers
+logging.getLogger("src.enrich").warning("module warning reached")
+logging.getLogger("src.list_fetcher").info("module info reached")
+logging.getLogger("httpx").info("HTTP Request: GET https://example.invalid/?api_key=SECRET")
+logging.shutdown()
+""",
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("TMDB_")}
+    env["TMDB_HOME"] = str(tmp_path / "home")
+    result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, env=env)
+
+    assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
+    assert result.stderr == ""
+    assert result.stdout.count("module warning reached") == 1
+    assert "module info reached" in result.stdout
+    log_text = (tmp_path / "home" / "logs" / "movie_tracker.log").read_text(encoding="utf-8")
+    assert "[WARNING] module warning reached" in log_text
+    assert "[INFO] module info reached" in log_text
+    assert "SECRET" not in log_text + result.stdout

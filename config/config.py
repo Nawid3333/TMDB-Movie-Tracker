@@ -32,7 +32,6 @@ POSTERS_DIR = DATA_DIR / "posters"
 INDEX_FILE = DATA_DIR / "index.json"
 DETAILS_FILE = DATA_DIR / "details.json"
 COLLECTION_CACHE_FILE = DATA_DIR / "collection_cache.json"
-KEYWORD_TV_CACHE_FILE = DATA_DIR / "keyword_tv_cache.json"
 GAPS_FILE = DATA_DIR / "gaps.json"
 ENRICH_CHECKPOINT_FILE = DATA_DIR / "enrich_checkpoint.json"
 LOG_FILE = LOGS_DIR / "movie_tracker.log"
@@ -117,9 +116,6 @@ COOL_DAYS = int(os.getenv("TMDB_COOL_DAYS", "730"))
 COLD_REENRICH_DAYS = int(os.getenv("TMDB_COLD_REENRICH_DAYS", "90"))
 MIN_SHRINK_RATIO = float(os.getenv("TMDB_MIN_SHRINK_RATIO", "0.5"))
 
-# ==================== FRANCHISE KEYWORD HEURISTIC ====================
-FRANCHISE_KEYWORD_MIN_MOVIES = int(os.getenv("TMDB_FRANCHISE_KEYWORD_MIN_MOVIES", "2"))
-
 # ==================== POSTER RENDERING ====================
 POSTER_MODE = os.getenv("POSTER_MODE", "auto").strip().lower()
 POSTER_SIZE = os.getenv("POSTER_SIZE", "w342").strip() or "w342"
@@ -144,12 +140,32 @@ TMDB_FALLBACK_REGION = os.getenv("TMDB_FALLBACK_REGION", "DE").strip().upper() o
 
 
 # ==================== LOGGING ====================
+# Names for the two handlers setup_logging() installs, so a second call can
+# recognise them -- the root logger may already carry someone else's handler
+# (pytest's log capture, for one), so "root has handlers" proves nothing.
+_FILE_HANDLER_NAME = "movie_tracker.file"
+_CONSOLE_HANDLER_NAME = "movie_tracker.console"
+
+
 def setup_logging() -> logging.Logger:
-    """Configure rotating file + console logging."""
+    """Configure rotating file + console logging on the root logger.
+
+    Every module logs through ``logging.getLogger(__name__)`` -- "src.enrich",
+    "src.list_fetcher" and so on. These handlers used to sit on a logger
+    named "movie_tracker", which none of those names descend from, so every
+    module's records went to the root logger with no handler at all: Python's
+    last-resort fallback printed warnings unformatted to stderr (interleaving
+    with the menu, exactly what the stdout routing below exists to prevent),
+    dropped everything below WARNING, and wrote nothing to the log file the
+    error messages point the user at. On the root logger, every module's
+    records reach both handlers. The returned "movie_tracker" logger is what
+    main.py logs through; it propagates to the same place.
+    """
     logger = logging.getLogger("movie_tracker")
-    if logger.handlers:
+    root = logging.getLogger()
+    if any(handler.get_name() == _FILE_HANDLER_NAME for handler in root.handlers):
         return logger
-    logger.setLevel(logging.DEBUG)
+    root.setLevel(logging.DEBUG)
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -167,8 +183,10 @@ def setup_logging() -> logging.Logger:
     ch.setLevel(logging.INFO)
     ch.setFormatter(term.ColorFormatter("%(message)s"))
 
-    logger.addHandler(fh)
-    logger.addHandler(ch)
+    fh.set_name(_FILE_HANDLER_NAME)
+    ch.set_name(_CONSOLE_HANDLER_NAME)
+    root.addHandler(fh)
+    root.addHandler(ch)
 
     for name in ("httpx", "httpcore", "urllib3"):
         logging.getLogger(name).setLevel(logging.WARNING)

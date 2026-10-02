@@ -9,7 +9,7 @@ caught by testing the data layer.
 Style note for future edits
 ---------------------------
 Rendering tests assert on *content and invariants* -- "the box is rectangular",
-"the title appears", "the default is used" -- not on exact strings, so
+"the title appears", "a typo is asked again" -- not on exact strings, so
 restyling the output does not break the suite. The width maths is the one place
 exact numbers matter, because everything else is built on it.
 """
@@ -22,7 +22,7 @@ import io
 
 from src.ui import term
 from src.ui.cards import render_detail_card
-from src.ui.prompts import ask_choice, confirm, confirm_category, paginate_list
+from src.ui.prompts import confirm_category, paginate_list
 from src.ui.reports import _is_upcoming, title_line
 
 
@@ -34,20 +34,25 @@ def captured():
 
 
 @contextlib.contextmanager
-def answers(*scripted: str, default: str = ""):
+def answers(*scripted: str):
     """Feed input() from a script and record the prompts it was asked with.
 
     Yields the list of prompt strings. That matters because input() writes its
     prompt to stdout itself, so a mocked input means the prompt never lands in
     captured output -- asserting on what the user was actually asked has to go
     through this list.
+
+    The script is finite: a prompt asked once more than scripted fails the
+    test instead of being fed a fallback answer forever.
     """
     remaining = list(scripted)
     asked: list[str] = []
 
     def fake_input(prompt: str = "") -> str:
         asked.append(prompt)
-        return remaining.pop(0) if remaining else default
+        if not remaining:
+            raise AssertionError(f"asked again after the scripted answers ran out: {prompt!r}")
+        return remaining.pop(0)
 
     real = builtins.input
     builtins.input = fake_input
@@ -186,67 +191,31 @@ class TestTitleLine:
 
 
 # ── prompts ─────────────────────────────────────────────────────────────────
-
-
-class TestConfirm:
-    def test_yes_is_accepted(self):
-        with answers("y"), captured():
-            assert confirm("go?") is True
-
-    def test_no_is_accepted(self):
-        with answers("n"), captured():
-            assert confirm("go?", default=True) is False
-
-    def test_empty_input_takes_the_default(self):
-        with answers(""), captured():
-            assert confirm("go?", default=True) is True
-        with answers(""), captured():
-            assert confirm("go?", default=False) is False
-
-    def test_the_default_is_shown_so_it_is_never_a_surprise(self):
-        """The capitalised letter in [Y/n] is which key Enter presses."""
-        with answers("") as asked, captured():
-            confirm("go?", default=True)
-        assert "[Y/n]" in asked[0]
-        with answers("") as asked, captured():
-            confirm("go?", default=False)
-        assert "[y/N]" in asked[0]
-
-    def test_an_unrecognised_answer_is_re_asked_rather_than_guessed(self):
-        with answers("maybe", "y") as asked, captured():
-            assert confirm("go?") is True
-        assert len(asked) == 2
-
-
-class TestAskChoice:
-    def test_a_listed_option_is_returned(self):
-        with answers("b"), captured():
-            assert ask_choice("pick", ["a", "b"], default="a") == "b"
-
-    def test_empty_input_takes_the_default(self):
-        with answers(""), captured():
-            assert ask_choice("pick", ["a", "b"], default="a") == "a"
-
-    def test_an_unlisted_answer_is_re_asked_rather_than_guessed(self):
-        with answers("zzz", "a"), captured():
-            assert ask_choice("pick", ["a", "b"], default="a") == "a"
+# confirm() and ask() themselves -- strict answers, re-asking, the safe answer
+# at end of input -- are covered in tests/test_prompt_retry.py.
 
 
 class TestConfirmCategory:
-    def test_an_empty_category_still_asks_and_honours_the_default(self):
+    def test_an_empty_category_still_asks(self):
         """It does not short-circuit -- main.py guards with `if change_set.removals`.
 
         Pinned so that guard cannot be dropped without a test noticing: without
         it, an empty category would put a bare "Approve these changes?" in front
         of the user with nothing listed above it.
         """
-        with answers("") as asked, captured():
-            assert confirm_category("Removals", [], default=False) is False
+        with answers("n") as asked, captured():
+            assert confirm_category("Removals", []) is False
         assert asked, "an empty category currently still prompts"
+
+    def test_enter_does_not_approve_a_category(self):
+        """It used to: the Additions prompt read "[Y/n]" and Enter approved them."""
+        with answers("", "n") as asked, captured():
+            assert confirm_category("Additions", ["Movie A"]) is False
+        assert len(asked) == 2
 
     def test_the_items_are_shown_before_the_question(self):
         with answers("y"), captured() as out:
-            confirm_category("Removals", ["Movie A", "Movie B"], default=False)
+            confirm_category("Removals", ["Movie A", "Movie B"])
         printed = out.getvalue()
         assert "Movie A" in printed and "Movie B" in printed
 
@@ -258,9 +227,22 @@ class TestPaginateList:
         assert "item 4" in out.getvalue()
 
     def test_a_long_list_can_be_skipped(self):
-        with answers("q", default="q"), captured() as out:
+        with answers("q"), captured() as out:
             paginate_list([f"item {n}" for n in range(500)], page_size=10)
         assert "item 499" not in out.getvalue()
+
+    def test_enter_turns_the_page(self):
+        with answers("", "q"), captured() as out:
+            paginate_list([f"item {n}" for n in range(30)], page_size=10)
+        printed = out.getvalue()
+        assert "item 19" in printed
+        assert "item 20" not in printed
+
+    def test_a_typo_is_asked_again_instead_of_paging_on(self):
+        with answers("x", "q") as asked, captured() as out:
+            paginate_list([f"item {n}" for n in range(30)], page_size=10)
+        assert len(asked) == 2
+        assert "item 10" not in out.getvalue()
 
     def test_an_empty_list_prints_nothing(self):
         with captured() as out:
@@ -283,7 +265,6 @@ class TestRenderDetailCard:
             "directors": ["Christopher Nolan"],
             "cast": [{"name": "Leonardo DiCaprio", "character": "Cobb"}],
             "collection": {"id": 1, "name": "Nolan Collection"},
-            "connected_tv": [{"name": "Some Show", "via_keyword": "dream"}],
             "overview": "A thief who steals corporate secrets.",
         }
         with captured() as out:
@@ -292,6 +273,15 @@ class TestRenderDetailCard:
         for expected in ("Inception", "148", "Action", "Christopher Nolan", "Leonardo DiCaprio", "Nolan Collection"):
             assert expected in printed, f"{expected!r} missing from the card"
         assert "themoviedb.org/movie/27205" in printed
+
+    def test_connected_tv_left_by_an_older_build_is_not_shown(self):
+        """The tracker is movies only; the card's "Connected TV:" block is gone."""
+        detail = {"connected_tv": [{"id": 1399, "name": "Some Show", "via_keyword": "dream"}]}
+        with captured() as out:
+            render_detail_card({"id": 1, "title": "X"}, detail)
+        printed = out.getvalue()
+        assert "Connected TV" not in printed
+        assert "Some Show" not in printed
 
     def test_an_almost_empty_record_still_renders(self):
         """Enrichment is optional, so a bare membership record must not crash."""

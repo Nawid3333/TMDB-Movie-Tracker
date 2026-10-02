@@ -6,7 +6,7 @@ harness, the tolerance, and how to re-record the baseline.
 What belongs here
 -----------------
 Work whose cost grows with the number of tracked movies: change detection over
-the whole list, the gap scan that walks every collection and keyword, and the
+the whole list, the gap scan that walks every collection, and the
 atomic index writer that serialises the entire file on every save.
 
 What does not: anything that makes a request. The API paths are covered by the
@@ -91,7 +91,7 @@ def test_atomic_index_write(bench, tmp_path: Path):
 
 @pytest.mark.benchmark
 def test_gap_scan_over_a_full_index(bench, tmp_project, monkeypatch):
-    """Walks every collection part and every connected TV entry in the index."""
+    """Walks every collection part in the index."""
     import src.gaps as gaps_module
     import src.index as index_module
 
@@ -101,20 +101,11 @@ def test_gap_scan_over_a_full_index(bench, tmp_project, monkeypatch):
         "movies": {
             str(n): {
                 "id": n,
-                "keywords": [f"franchise-{n % 40}", "sequel"],
                 "collection": {
                     "id": n % 200,
                     "name": f"Collection {n % 200}",
                     "parts": [{"id": 900000 + n, "title": f"Missing {n}", "release_date": "2030-01-01"}],
                 },
-                "connected_tv": [
-                    {
-                        "id": 800000 + n,
-                        "name": f"Show {n}",
-                        "first_air_date": "2021-01-01",
-                        "via_keyword": f"franchise-{n % 40}",
-                    }
-                ],
             }
             for n in range(1, 2001)
         },

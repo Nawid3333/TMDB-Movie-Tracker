@@ -22,43 +22,86 @@ from config.config import (
     TMDB_READ_MAX_RETRIES,
     TMDB_READ_RETRY_DELAY,
 )
-from src.ui.term import cinput as input
+from src.ui import prompts
 from src.ui.term import cprint as print
 
 logger = logging.getLogger(__name__)
 
 
 class TokenBucket:
-    """Thread-safe token bucket for request pacing.
+    """Thread-safe request pacer: at most ``rate_per_second`` request starts per second.
 
-    The actual sleep is performed outside the lock so that parallel workers
-    are not serialized while waiting for tokens.
+    Each acquire() *reserves* the next free slot under the lock and then
+    sleeps until it, outside the lock, so parallel workers queue up one slot
+    apart instead of being serialized on the lock itself.
+
+    The old bucket only ever looked at "are there tokens right now": every
+    worker that arrived while it was empty saw the same zero, slept the same
+    1/rate, and then all of them went at once. With 16 detail workers and a
+    configured 30/s it measured 486/s with instant responses and 70/s at a
+    realistic 200 ms -- well past TMDB's own limit, which answered with 429s
+    and multi-second backoffs. A reservation can go negative, so the next
+    caller waits behind the ones already queued.
+
+    The bucket holds a single token, so there is no burst either: a full
+    bucket of `rate` tokens let the first second run at twice the rate. The
+    configured number is the ceiling over any window, across all workers.
     """
 
     def __init__(self, rate_per_second: float):
         self.rate = rate_per_second
-        self.tokens = rate_per_second
+        self.capacity = 1.0
+        self.tokens = self.capacity
         self.last_update = time.monotonic()
         self._lock = threading.Lock()
 
     def acquire(self) -> None:
-        sleep_time = 0.0
         with self._lock:
             now = time.monotonic()
             elapsed = now - self.last_update
-            self.tokens = min(self.rate, self.tokens + elapsed * self.rate)
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
             self.last_update = now
-            if self.tokens < 1.0:
-                deficit = 1.0 - self.tokens
-                sleep_time = deficit / self.rate
-                self.tokens = 0.0
-            else:
-                self.tokens -= 1.0
+            # Take the token even when there is none: a negative balance is a
+            # queue of reserved slots, and it is what makes the next caller
+            # wait behind this one instead of alongside it.
+            self.tokens -= 1.0
+            sleep_time = -self.tokens / self.rate if self.tokens < 0.0 else 0.0
 
         if sleep_time > 0.0:
             time.sleep(sleep_time)
-            with self._lock:
-                self.last_update = time.monotonic()
+
+
+# Transport failures worth another attempt. NetworkError covers connect,
+# read, write and close errors (a connection reset mid-response is a
+# ReadError); RemoteProtocolError is the server dropping a pooled keep-alive
+# connection without answering. Only ConnectError and timeouts were retried
+# before, so either of the others failed a list page or a movie outright.
+_RETRYABLE_ERRORS = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+
+
+def check_status(resp: httpx.Response) -> None:
+    """raise_for_status() without the URL: the message names only method and path.
+
+    httpx's own message quotes the full request URL, and every v3 URL carries
+    api_key= (and usually session_id=) in its query string. That message was
+    printed on the failure row of a full scan and logged on every list fetch
+    of a private list, so a bad key or an expired session printed the
+    credentials to the console. The real response is still on the exception
+    for any caller that needs the status code.
+    """
+    if resp.is_success:
+        return
+    request = resp.request
+    raise httpx.HTTPStatusError(
+        f"HTTP {resp.status_code} for {request.method} {request.url.path}",
+        request=request,
+        response=resp,
+    )
+
+
+def is_auth_rejected(exc: BaseException) -> bool:
+    """True when TMDB refused the credentials themselves (HTTP 401)."""
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401
 
 
 class _TMDBClientLike(Protocol):
@@ -121,9 +164,12 @@ class TMDBClient:
         if auth and self.session_id:
             params["session_id"] = self.session_id
 
-        self.bucket.acquire()
         last_exc: Exception | None = None
         for attempt in range(1, retries + 1):
+            # Every attempt is a request, so every attempt waits for its slot.
+            # Acquiring once before the loop let retries -- typically after a
+            # 429, exactly when TMDB wants fewer requests -- bypass the pacer.
+            self.bucket.acquire()
             try:
                 resp = self.client.request(
                     method,
@@ -138,7 +184,7 @@ class TMDBClient:
                         response=resp,
                     )
                 return resp
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as exc:
+            except (*_RETRYABLE_ERRORS, httpx.HTTPStatusError) as exc:
                 last_exc = exc
                 if attempt < retries:
                     delay = self._retry_delay(getattr(exc, "response", None))
@@ -326,7 +372,8 @@ class TMDBClient:
             webbrowser.open(url)
         except Exception as exc:
             logger.warning("Could not open browser: %s", exc)
-        input("Press Enter after approving TMDB v4 access in your browser...")
+        if not prompts.wait_for_enter("Press Enter after approving TMDB v4 access in your browser..."):
+            return None
         access_token = self._exchange_v4_access_token(token)
         if access_token:
             print()
@@ -345,8 +392,11 @@ class TMDBClient:
             webbrowser.open(url)
         except Exception as exc:
             logger.warning("Could not open browser: %s", exc)
-        input_text = input("Press Enter after approving TMDB in your browser...")
-        _ = input_text
+        # End of input used to raise out of here and end the whole program at
+        # startup ("Unexpected error ... This is a bug"). Without a confirmed
+        # approval there is nothing to convert, so carry on without a session.
+        if not prompts.wait_for_enter("Press Enter after approving TMDB in your browser..."):
+            return None
         session_id = self._create_session_from_token(token)
         if session_id:
             print()
