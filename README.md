@@ -14,6 +14,7 @@ A small, terminal-driven Python tool that keeps a local mirror of a TMDB custom 
 - **Full scan** — re-enriches every movie with full TMDB details (credits, release dates, watch providers, recommendations, similar, collection info).
 - **Franchise gaps** — finds the films of your movies' TMDB collections that are not yet in your index. Movies only; no TV series.
 - **Search & add** — accepts a title, TMDB URL/ID or IMDb URL/ID and adds the movie locally (and optionally pushes it to the remote TMDB list when a session is available).
+- **Push URL file** — pushes the movies in a text file (`movie_urls.txt` by default, one TMDB/IMDb URL or id per line, `#` for comments) to the remote list without adding them locally. Lines naming a movie an earlier line already names are listed and deleted from the file after a **y**; the first line stays, and **n** leaves the file as it is.
 - **Poster rendering** — downloads and renders inline posters for iTerm2, Kitty, Windows Terminal or block-art terminals (configurable, falls back to off).
 - **Atomic writes & backups** — every JSON write is atomic via temp-file + `fsync` + `os.replace`, with automatic `.bak1`/`.bak2`/`.bak3` rotation.
 
@@ -31,16 +32,13 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` only pins runtime dependencies:
+`requirements.txt` holds only the runtime dependencies, `httpx` and `python-dotenv`; their minimum versions live there and in `pyproject.toml`, which Dependabot keeps current.
 
-- `httpx>=0.27.0`
-- `python-dotenv>=1.0.0`
-
-Tests additionally need `pytest` and `respx`. They can be installed with:
+The tests and the linters (`pytest`, `respx`, `ruff`, `pyright`) come with the `dev` extra:
 
 ```bash
 pip install -r requirements.txt
-pip install pytest respx ruff
+pip install ".[dev]"
 ```
 
 ### 2. Configure your environment
@@ -92,8 +90,10 @@ Menu
   1. Full scan       — every detail (slow, accurate)
   2. Fast scan       — list membership only (quick)
   3. Franchise gaps  — films from your movies' collections you missed
+  4. Push URL file   — push URLs/IDs to remote list without adding locally
+  5. Force re-enrich — re-fetch every movie, ignoring freshness
   0. Exit
-Enter your choice (0-3):
+Enter your choice (0-5):
 ```
 
 ---

@@ -6,8 +6,10 @@ import respx
 
 import config.config as _config
 from src.search import (
+    DuplicateLine,
     SearchError,
     _parse_user_input,
+    delete_file_lines,
     fetch_full_movie,
     push_to_tmdb_list,
     remove_from_tmdb_list,
@@ -307,9 +309,10 @@ class TestBatchFileReading:
         path = tmp_path / "urls.txt"
         path.write_text("603\n550\n", encoding="utf-8-sig")
         respx.get(url__regex=r"https://api\.themoviedb\.org/3/movie/\d+").mock(side_effect=self._movie)
-        records, skipped = resolve_movie_ids_from_file(client, str(path))
+        records, skipped, duplicates = resolve_movie_ids_from_file(client, str(path))
         assert [r["id"] for r in records] == [603, 550]
         assert skipped == []
+        assert duplicates == []
 
     def test_a_utf16_file_is_a_search_error_not_a_crash(self, tmp_path, client: TMDBClient) -> None:
         """What PowerShell 5's `>` writes. UnicodeDecodeError went past `except OSError`."""
@@ -323,12 +326,58 @@ class TestBatchFileReading:
         path = tmp_path / "urls.txt"
         path.write_text("603\nnot a movie\n", encoding="utf-8")
         respx.get("https://api.themoviedb.org/3/movie/603").mock(return_value=httpx.Response(401, json={}))
-        records, skipped = resolve_movie_ids_from_file(client, str(path))
+        records, skipped, _duplicates = resolve_movie_ids_from_file(client, str(path))
         assert records == []
         assert skipped == [
             (1, "603", "TMDB lookup failed (/movie/603 failed: HTTP 401 for GET /3/movie/603)"),
             (2, "not a movie", "not a TMDB/IMDb movie URL or id"),
         ]
+
+    @respx.mock
+    def test_a_repeated_movie_is_a_duplicate_of_its_first_line(self, tmp_path, client: TMDBClient) -> None:
+        """By TMDB id, whatever form the line takes; the first line is the one used."""
+        path = tmp_path / "urls.txt"
+        path.write_text("550\n# a note\nhttps://www.themoviedb.org/movie/550\n603\n550\n", encoding="utf-8")
+        respx.get(url__regex=r"https://api\.themoviedb\.org/3/movie/\d+").mock(side_effect=self._movie)
+        records, skipped, duplicates = resolve_movie_ids_from_file(client, str(path))
+        assert [r["id"] for r in records] == [550, 603]
+        assert skipped == []
+        assert duplicates == [
+            DuplicateLine(3, "https://www.themoviedb.org/movie/550", 550, 1, "550"),
+            DuplicateLine(5, "550", 550, 1, "550"),
+        ]
+
+
+class TestDeleteFileLines:
+    """Deleting a batch file's duplicate lines touches those lines and nothing else."""
+
+    def test_only_the_named_lines_go(self, tmp_path) -> None:
+        """Line endings, the byte-order mark, comments and blank lines all stay."""
+        path = tmp_path / "urls.txt"
+        path.write_bytes(b"\xef\xbb\xbf550\r\n# keep me\r\n\r\nhttps://www.themoviedb.org/movie/550\r\n603\r\n550")
+        delete_file_lines(
+            str(path),
+            [
+                DuplicateLine(4, "https://www.themoviedb.org/movie/550", 550, 1, "550"),
+                DuplicateLine(6, "550", 550, 1, "550"),
+            ],
+        )
+        assert path.read_bytes() == b"\xef\xbb\xbf550\r\n# keep me\r\n\r\n603\r\n"
+
+    def test_a_file_edited_since_it_was_read_is_left_alone(self, tmp_path) -> None:
+        """Line 2 is no longer the duplicate it was; deleting it would lose 603."""
+        path = tmp_path / "urls.txt"
+        path.write_text("550\n603\n550\n", encoding="utf-8")
+        with pytest.raises(SearchError, match="changed since it was read"):
+            delete_file_lines(str(path), [DuplicateLine(2, "550", 550, 1, "550")])
+        assert path.read_text(encoding="utf-8") == "550\n603\n550\n"
+
+    def test_a_file_that_got_shorter_is_left_alone(self, tmp_path) -> None:
+        path = tmp_path / "urls.txt"
+        path.write_text("550\n", encoding="utf-8")
+        with pytest.raises(SearchError, match="changed since it was read"):
+            delete_file_lines(str(path), [DuplicateLine(3, "550", 550, 1, "550")])
+        assert path.read_text(encoding="utf-8") == "550\n"
 
     @respx.mock
     def test_a_movie_tmdb_does_not_have_says_so(self, client: TMDBClient) -> None:
