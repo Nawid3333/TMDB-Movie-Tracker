@@ -24,7 +24,9 @@ from src.gaps import find_gaps
 from src.index import load_index, now_iso, save_index
 from src.list_fetcher import ListFetchError, fetch_list
 from src.search import (
+    DuplicateLine,
     SearchError,
+    delete_file_lines,
     is_movie_reference,
     push_to_tmdb_list,
     remove_from_tmdb_list,
@@ -726,6 +728,39 @@ def _select_batch_source() -> tuple[str, str] | None:
     return None
 
 
+def _offer_duplicate_deletion(file_path: str, duplicates: list[DuplicateLine], records: list[dict]) -> None:
+    """List the lines that repeat an earlier line's movie and offer to delete them.
+
+    The first line of each movie stays: it is the one the push uses. Nothing
+    is deleted without a y. Declined, or when the file cannot be rewritten,
+    the duplicates are skipped in this run exactly as they always were.
+    """
+    titles = {int(record["id"]): title_line(record) for record in records}
+    groups: dict[int, list[DuplicateLine]] = {}
+    for dup in duplicates:
+        groups.setdefault(dup.kept_line_num, []).append(dup)
+
+    print(term.warn(f"\n⚠ {len(duplicates)} duplicate line(s) — the same movie as an earlier line:"))
+    for kept_line_num, group in groups.items():
+        print(f"  {titles.get(group[0].movie_id, group[0].movie_id)}")
+        print(f"    Line {kept_line_num}: {group[0].kept_raw[:80]!r} — kept")
+        for dup in group:
+            print(f"    Line {dup.line_num}: {dup.raw[:80]!r} — duplicate")
+
+    if not prompts.confirm(f"\nDelete these {len(duplicates)} duplicate line(s) from {file_path}?"):
+        print("  → Kept; the file is unchanged. The duplicates are skipped in this run.")
+        return
+    try:
+        delete_file_lines(file_path, duplicates)
+    except (OSError, SearchError) as exc:
+        log.error("Could not delete duplicate lines from %s: %s", file_path, exc)
+        print(term.err(f"✗ Could not delete them: {exc}"))
+        print("  The duplicates are skipped in this run.")
+        return
+    log.info("Deleted %d duplicate line(s) from %s", len(duplicates), file_path)
+    print(term.ok(f"✓ Deleted {len(duplicates)} duplicate line(s) from {file_path}."))
+
+
 def run_push_url_file_only(client: TMDBClient) -> None:
     """Push IDs/URLs from a text file to the remote list without touching the local index.
 
@@ -751,11 +786,12 @@ def run_push_url_file_only(client: TMDBClient) -> None:
 
     records: list[dict] = []
     skipped: list[tuple[int, str, str]] = []
+    duplicate_lines: list[DuplicateLine] = []
 
     kind, value = source
     if kind == "file":
         try:
-            records, skipped = resolve_movie_ids_from_file(client, value)
+            records, skipped, duplicate_lines = resolve_movie_ids_from_file(client, value)
         except SearchError as exc:
             log.error("Failed to read URL file: %s", exc)
             print(term.err(f"✗ Failed to read file: {exc}"))
@@ -771,6 +807,11 @@ def run_push_url_file_only(client: TMDBClient) -> None:
         print(term.warn(f"\n⚠ Skipped {len(skipped)} line(s):"))
         for line_num, raw, reason in skipped:
             print(f"  Line {line_num}: {raw[:80]!r} — {reason}")
+
+    # After the skip notes, not before: their line numbers are the file's as
+    # it was read, and deleting a duplicate above one would shift it.
+    if duplicate_lines:
+        _offer_duplicate_deletion(value, duplicate_lines, records)
 
     if not records:
         print(term.err("\n✗ No valid movies found in file."))

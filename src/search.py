@@ -2,11 +2,13 @@
 
 import logging
 import re
+from typing import NamedTuple
 
 import httpx
 
 import config.config as _config
 from config.config import TMDB_LANGUAGE
+from src.atomic_io import atomic_write_bytes
 from src.index import (
     build_membership_record,
     ensure_record_exists,
@@ -47,10 +49,12 @@ _IMDB_ID_RE = re.compile(r"^tt\d+$")
 _TMDB_ID_RE = re.compile(r"^\d+$")
 
 __all__ = [
+    "DuplicateLine",
     "EnrichError",
     "ParseError",
     "SearchError",
     "add_movie_locally",
+    "delete_file_lines",
     "fetch_full_movie",
     "is_movie_reference",
     "push_to_tmdb_list",
@@ -71,6 +75,16 @@ class ParseError(Exception):
 
 class EnrichError(Exception):
     """Raised when fetch_full_movie cannot enrich a known or new record."""
+
+
+class DuplicateLine(NamedTuple):
+    """A batch-file line naming a movie that an earlier line already names."""
+
+    line_num: int
+    raw: str
+    movie_id: int
+    kept_line_num: int
+    kept_raw: str
 
 
 def _parse_user_input(query: str) -> dict:
@@ -327,7 +341,7 @@ def resolve_movie_ids_from_file(
     file_path: str,
     *,
     language: str = TMDB_LANGUAGE,
-) -> tuple[list[dict], list[tuple[int, str, str]]]:
+) -> tuple[list[dict], list[tuple[int, str, str]], list[DuplicateLine]]:
     r"""Read a text file and resolve each line to a TMDB movie record.
 
     Lines may be:
@@ -339,13 +353,21 @@ def resolve_movie_ids_from_file(
     Empty lines and lines starting with ``#`` are ignored. Lines that cannot
     be parsed are returned in the ``skipped`` list without hitting the API.
 
+    A line whose movie an earlier line already named is a duplicate: the
+    first line is the one used. Duplicates are told apart by TMDB id, so an
+    IMDb id and a TMDB URL for the same film are one movie. They used to be
+    skipped as "duplicate id in file"; they are returned on their own now so
+    the caller can offer to delete them from the file.
+
     Returns:
-        A tuple ``(records, skipped)`` where ``records`` is a list of
-        membership dicts and ``skipped`` is a list of
-        ``(line_number, raw_line, reason)`` tuples.
+        A tuple ``(records, skipped, duplicates)`` where ``records`` is a
+        list of membership dicts, ``skipped`` is a list of
+        ``(line_number, raw_line, reason)`` tuples and ``duplicates`` a list
+        of DuplicateLine, in file order.
     """
     records: list[dict] = []
     skipped: list[tuple[int, str, str]] = []
+    duplicates: list[DuplicateLine] = []
 
     # utf-8-sig, not utf-8: a byte-order mark (Notepad's "UTF-8 with BOM")
     # otherwise stays glued to the first line, which then reads "﻿603"
@@ -362,7 +384,7 @@ def resolve_movie_ids_from_file(
         logger.error("Could not decode %s: %s", file_path, exc)
         raise SearchError(f"{file_path} is not UTF-8 text; save it as UTF-8 and try again") from exc
 
-    seen: set[int] = set()
+    first_line: dict[int, tuple[int, str]] = {}
     for line_num, line in lines:
         raw = line.strip()
         if not raw or raw.startswith("#"):
@@ -374,13 +396,38 @@ def resolve_movie_ids_from_file(
             continue
 
         movie_id = int(record["id"])
-        if movie_id in seen:
-            skipped.append((line_num, raw, "duplicate id in file"))
+        if movie_id in first_line:
+            duplicates.append(DuplicateLine(line_num, raw, movie_id, *first_line[movie_id]))
             continue
-        seen.add(movie_id)
+        first_line[movie_id] = (line_num, raw)
         records.append(record)
 
-    return records, skipped
+    return records, skipped, duplicates
+
+
+def delete_file_lines(file_path: str, duplicates: list[DuplicateLine]) -> None:
+    r"""Delete exactly these lines from a batch file and leave every other byte alone.
+
+    The file is handled as bytes, split where the text-mode read numbered its
+    lines (``\n``, ``\r\n`` or a lone ``\r``), so line endings, a byte-order
+    mark, comments and blank lines all come back unchanged.
+
+    Each line is checked against the text it was read with first. Resolving
+    a file takes one lookup per line, and a file edited in the meantime would
+    otherwise lose whatever line now sits at that number. A mismatch raises
+    SearchError and nothing is written.
+    """
+    try:
+        with open(file_path, "rb") as fh:
+            lines = fh.read().splitlines(keepends=True)
+    except OSError as exc:
+        raise SearchError(f"Could not read {file_path}: {exc}") from exc
+
+    doomed = {dup.line_num: dup.raw for dup in duplicates}
+    for line_num, raw in doomed.items():
+        if line_num > len(lines) or lines[line_num - 1].decode("utf-8-sig", errors="replace").strip() != raw:
+            raise SearchError(f"{file_path} changed since it was read (line {line_num}); nothing was deleted")
+    atomic_write_bytes(file_path, b"".join(line for num, line in enumerate(lines, 1) if num not in doomed))
 
 
 def push_to_tmdb_list(client: TMDBClient, list_id: str | int, movie_id: int) -> dict:

@@ -321,3 +321,77 @@ class TestPushUrlFileOnly:
         url_551 = "https://www.themoviedb.org/movie/551"
         assert f"Fight Club — \x1b]8;;{url_550}\x1b\\{url_550}\x1b]8;;\x1b\\" in captured.out
         assert f"The Crying Game — \x1b]8;;{url_551}\x1b\\{url_551}\x1b]8;;\x1b\\" in captured.out
+
+
+class TestDuplicateLines:
+    """A line naming a movie an earlier line already names is offered for deletion."""
+
+    SOURCE = "550\n# keep this note\n603\nhttps://www.themoviedb.org/movie/550\n"
+
+    def _run(self, tmp_path, client, monkeypatch, *answers):
+        """Run the option on SOURCE with the given answers; return (file, inputs, add_item route)."""
+        from main import run_push_url_file_only
+
+        source = tmp_path / "push_urls.txt"
+        source.write_text(self.SOURCE, encoding="utf-8")
+        respx.get("https://api.themoviedb.org/3/movie/550").mock(
+            return_value=httpx.Response(200, json={"id": 550, "title": "Fight Club", "release_date": "1999-10-15"})
+        )
+        respx.get("https://api.themoviedb.org/3/movie/603").mock(
+            return_value=httpx.Response(200, json={"id": 603, "title": "The Matrix"})
+        )
+        respx.get("https://api.themoviedb.org/3/list/8678795").mock(
+            return_value=httpx.Response(200, json={"id": 8678795, "item_count": 0, "items": [], "total_pages": 1})
+        )
+        route = respx.post("https://api.themoviedb.org/3/list/8678795/add_item").mock(
+            return_value=httpx.Response(200, json={"status_code": 12})
+        )
+        inputs = mock.Mock(side_effect=[str(source), *answers])
+        monkeypatch.setattr("builtins.input", inputs)
+        monkeypatch.setattr("config.config.TMDB_LIST_ID", 8678795)
+        client.session_id = "fake_session"
+        run_push_url_file_only(client)
+        return source, inputs, route
+
+    @respx.mock
+    def test_y_deletes_the_later_line_and_keeps_the_first(self, tmp_path, tmp_project, client, monkeypatch, capsys):
+        source, inputs, route = self._run(tmp_path, client, monkeypatch, "y", "y")
+        out = capsys.readouterr().out
+        assert "Delete these 1 duplicate line(s) from" in inputs.call_args_list[1].args[0]
+        assert "Fight Club (1999)" in out
+        assert "Line 1: '550' — kept" in out
+        assert "Line 4: 'https://www.themoviedb.org/movie/550' — duplicate" in out
+        assert "Deleted 1 duplicate line(s)" in out
+        assert source.read_text(encoding="utf-8") == "550\n# keep this note\n603\n"
+        # Each movie is still pushed once, and the duplicate is not listed a second time as skipped.
+        assert route.call_count == 2
+        assert "Skipped" not in out
+        assert "duplicate id in file" not in out
+
+    @respx.mock
+    def test_n_leaves_the_file_as_it_was(self, tmp_path, tmp_project, client, monkeypatch, capsys):
+        source, _inputs, route = self._run(tmp_path, client, monkeypatch, "n", "y")
+        out = capsys.readouterr().out
+        assert "the file is unchanged" in out
+        assert source.read_text(encoding="utf-8") == self.SOURCE
+        assert route.call_count == 2
+
+    @respx.mock
+    def test_a_typo_is_asked_again_not_taken_as_an_answer(self, tmp_path, tmp_project, client, monkeypatch, capsys):
+        source, inputs, _route = self._run(tmp_path, client, monkeypatch, "yes", "", "y", "n")
+        assert "Delete these" in inputs.call_args_list[3].args[0]
+        assert source.read_text(encoding="utf-8") == "550\n# keep this note\n603\n"
+
+    @respx.mock
+    def test_a_failed_rewrite_is_reported_and_the_push_goes_on(
+        self, tmp_path, tmp_project, client, monkeypatch, capsys
+    ):
+        def _fail(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("main.delete_file_lines", _fail)
+        source, _inputs, route = self._run(tmp_path, client, monkeypatch, "y", "y")
+        out = capsys.readouterr().out
+        assert "Could not delete them: disk full" in out
+        assert source.read_text(encoding="utf-8") == self.SOURCE
+        assert route.call_count == 2
