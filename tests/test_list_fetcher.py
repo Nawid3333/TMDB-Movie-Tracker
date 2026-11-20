@@ -1,12 +1,13 @@
 """Tests for src.list_fetcher."""
 
+import json
 from pathlib import Path
 
 import httpx
 import pytest
 import respx
 
-from src.list_fetcher import ListFetchError, fetch_list, load_cached_list
+from src.list_fetcher import ListFetchError, fetch_list, fetch_list_result, load_cached_list
 from src.tmdb_api import TMDBClient
 
 
@@ -235,3 +236,116 @@ class TestPaginationTrustsTheItemCount:
         _items, incomplete = fetch_list(client, 123, cache_path=tmp_path / "c.json")
         assert client.calls == 500
         assert incomplete is True
+
+
+class TestEntriesTmdbHides:
+    """TMDB can count a list entry it never returns (a movie it deleted or merged).
+
+    Seen live on 2026-11-20: list 8678795 counted 1,043 items, page 38 of 53
+    held 19, and every fetch -- v3 and v4, signed in or not -- came back with
+    1,042. The short-read check marked each one incomplete, so the startup
+    table said FAILED and every removal stayed blocked, for good. A shortfall
+    that small which reads the same twice is hidden entries, not a short read;
+    anything else stays incomplete.
+    """
+
+    class _Client:
+        """A list of *total* entries of which *hidden* positions (1-based) are never served."""
+
+        session_id: str | None = None
+
+        def __init__(
+            self, total: int, hidden: set[int], *, flaky_page: int | None = None, failing: set[int] | None = None
+        ):
+            self.total = total
+            self.hidden = hidden
+            self.flaky_page = flaky_page
+            self.failing = failing or set()
+            self.calls: list[int] = []
+
+        def get(self, path, params=None, auth=False):
+            page = (params or {}).get("page") or 1
+            self.calls.append(page)
+            if page in self.failing and self.calls.count(page) > 1:
+                raise httpx.ConnectError("boom")
+            start = (page - 1) * 20 + 1
+            positions = [p for p in range(start, min(start + 20, self.total + 1)) if p not in self.hidden]
+            if page == self.flaky_page and self.calls.count(page) > 1:
+                positions = positions[:-1]
+            items = [
+                {"media_type": "movie", "id": p, "title": f"M{p}", "release_date": "2020-01-01"} for p in positions
+            ]
+            return httpx.Response(
+                200,
+                json={"items": items, "item_count": self.total, "total_pages": (self.total + 19) // 20},
+                request=httpx.Request("GET", "https://example.com/"),
+            )
+
+        def ensure_session(self):
+            return None
+
+    def test_the_live_case_is_complete_with_one_hidden_entry(self, tmp_path: Path) -> None:
+        client = self._Client(1043, {745})
+        result = fetch_list_result(client, 123, cache_path=tmp_path / "c.json")
+        assert (len(result.items), result.incomplete, result.hidden, result.expected) == (1042, False, 1, 1043)
+        # Every page once, then the one short page again -- nothing more.
+        assert client.calls == [*range(1, 54), 38]
+
+    def test_fetch_list_reports_it_complete_too(self, tmp_path: Path) -> None:
+        items, incomplete = fetch_list(self._Client(1043, {745}), 123, cache_path=tmp_path / "c.json")
+        assert (len(items), incomplete) == (1042, False)
+
+    def test_the_cache_records_the_hidden_count(self, tmp_path: Path) -> None:
+        fetch_list_result(self._Client(1043, {745}), 123, cache_path=tmp_path / "c.json")
+        cached = json.loads((tmp_path / "c.json").read_text(encoding="utf-8"))
+        assert (cached["item_count"], cached["expected_count"], cached["hidden"], cached["incomplete"]) == (
+            1042,
+            1043,
+            1,
+            False,
+        )
+
+    def test_a_hidden_entry_alone_on_the_last_page(self, tmp_path: Path) -> None:
+        """Page 3 of a 41-entry list holds only the hidden entry, so it comes back empty."""
+        result = fetch_list_result(self._Client(41, {41}), 123, cache_path=tmp_path / "c.json")
+        assert (len(result.items), result.incomplete, result.hidden) == (40, False, 1)
+
+    def test_hidden_entries_on_several_pages(self, tmp_path: Path) -> None:
+        result = fetch_list_result(self._Client(100, {3, 47, 99}), 123, cache_path=tmp_path / "c.json")
+        assert (len(result.items), result.incomplete, result.hidden) == (97, False, 3)
+
+    def test_a_short_page_that_changes_when_read_again_is_a_short_read(self, tmp_path: Path) -> None:
+        client = self._Client(100, {47}, flaky_page=3)
+        result = fetch_list_result(client, 123, cache_path=tmp_path / "c.json")
+        assert (result.incomplete, result.hidden) == (True, 0)
+
+    def test_a_short_page_that_fails_to_load_again_is_a_short_read(self, tmp_path: Path) -> None:
+        client = self._Client(100, {47}, failing={3})
+        result = fetch_list_result(client, 123, cache_path=tmp_path / "c.json")
+        assert (result.incomplete, result.hidden) == (True, 0)
+
+    def test_more_missing_than_the_tolerance_stays_a_short_read(self, tmp_path: Path) -> None:
+        """Six of 100 missing, however steady, is more than TMDB hiding a deleted movie or two."""
+        result = fetch_list_result(self._Client(100, {1, 2, 3, 4, 5, 6}), 123, cache_path=tmp_path / "c.json")
+        assert (result.incomplete, result.hidden) == (True, 0)
+
+    def test_the_tolerance_grows_with_the_list(self, tmp_path: Path) -> None:
+        """One percent of a 2,000-entry list is 20."""
+        hidden = set(range(1, 2001, 100))
+        result = fetch_list_result(self._Client(2000, hidden), 123, cache_path=tmp_path / "c.json")
+        assert (result.incomplete, result.hidden) == (False, 20)
+        hidden.add(2000)
+        result = fetch_list_result(self._Client(2000, hidden), 123, cache_path=tmp_path / "c.json")
+        assert (result.incomplete, result.hidden) == (True, 0)
+
+    def test_a_failed_page_is_never_explained_away_as_hidden(self, tmp_path: Path) -> None:
+        """A page that failed on the first read ends the fetch incomplete, small gap or not."""
+
+        class FailsOnLastPage(self._Client):
+            def get(self, path, params=None, auth=False):
+                if ((params or {}).get("page") or 1) == 5:
+                    raise httpx.ConnectError("boom")
+                return super().get(path, params, auth)
+
+        result = fetch_list_result(FailsOnLastPage(81, set()), 123, cache_path=tmp_path / "c.json")
+        assert (len(result.items), result.incomplete, result.hidden) == (80, True, 0)
