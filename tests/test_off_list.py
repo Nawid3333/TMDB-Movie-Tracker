@@ -241,7 +241,7 @@ class TestTheStartupTable:
     def test_equal_counts_with_different_movies_are_a_mismatch(self, probe):
         """One movie left the list, another was added: 2 and 2, which used to read "match"."""
         out = probe(ListFetchResult(_list(1, 3), False), _index(1, 2))
-        row = next(line for line in out.splitlines() if "tmdb.org" in line).split()
+        row = next(cells for cells in (line.split() for line in out.splitlines()) if cells[:1] == ["tmdb.org"])
         assert row == ["tmdb.org", "OK", "2", "2", "mismatch"]
         assert "1 movie(s) in your index are not on the TMDB list" in out
         assert "Movie 2 (2020)" in out

@@ -42,8 +42,9 @@ def probe(tmp_path, monkeypatch):
 
 
 def _status_row(out: str) -> list[str]:
-    row = next(line for line in out.splitlines() if "tmdb.org" in line)
-    return row.split()
+    # The host column's exact label, not a substring test: CodeQL reads
+    # `"tmdb.org" in line` as an incomplete URL check.
+    return next(cells for cells in (line.split() for line in out.splitlines()) if cells[:1] == ["tmdb.org"])
 
 
 class TestStartupProbe:
