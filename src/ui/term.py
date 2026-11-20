@@ -131,26 +131,6 @@ def _terminal_width(default: int = 80) -> int:
         return default
 
 
-def wrap(text: str, width: int | None = None) -> list[str]:
-    """Wrap text to fit the terminal, preserving existing line breaks."""
-    if width is None:
-        width = _terminal_width() - 4
-    width = max(width, 20)
-    lines: list[str] = []
-    for raw in text.splitlines():
-        current = raw.rstrip()
-        while display_width(current) > width:
-            cut = width
-            while cut > 0 and current[cut] != " ":
-                cut -= 1
-            if cut == 0:
-                cut = width
-            lines.append(current[:cut].rstrip())
-            current = current[cut:].lstrip()
-        lines.append(current)
-    return lines
-
-
 def box(lines: list[str], width: int | None = None) -> list[str]:
     """Return a list of box-drawn lines, accounting for ANSI codes."""
     if width is None:

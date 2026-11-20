@@ -10,12 +10,10 @@ from src.search import (
     SearchError,
     _parse_user_input,
     delete_file_lines,
-    fetch_full_movie,
     push_to_tmdb_list,
     remove_from_tmdb_list,
     resolve_movie_ids_from_file,
     resolve_movie_input,
-    search_movies,
 )
 from src.tmdb_api import TMDBClient
 
@@ -45,54 +43,6 @@ class TestParseUserInput:
 
         with pytest.raises(ParseError):
             _parse_user_input("  ")
-
-
-class TestSearchMovies:
-    @respx.mock
-    def test_search_by_title(self, fixtures: dict, client: TMDBClient) -> None:
-        respx.get("https://api.themoviedb.org/3/search/movie").mock(
-            return_value=httpx.Response(200, json=fixtures["search_inception"])
-        )
-        results = search_movies(client, "Inception")
-        assert len(results) == fixtures["search_inception"]["total_results"]
-        assert all(r["id"] for r in results)
-
-    @respx.mock
-    def test_search_by_imdb_id(self, fixtures: dict, client: TMDBClient) -> None:
-        respx.get("https://api.themoviedb.org/3/find/tt1375666").mock(
-            return_value=httpx.Response(200, json=fixtures["find_imdb"])
-        )
-        results = search_movies(client, "tt1375666")
-        assert len(results) == len(fixtures["find_imdb"].get("movie_results", []))
-
-    @respx.mock
-    def test_search_by_tmdb_id(self, fixtures: dict, client: TMDBClient) -> None:
-        movie = fixtures["movie_9013"]
-        respx.get(f"https://api.themoviedb.org/3/movie/{movie['id']}").mock(
-            return_value=httpx.Response(200, json=movie)
-        )
-        results = search_movies(client, str(movie["id"]))
-        assert len(results) == 1
-        assert results[0]["id"] == movie["id"]
-
-
-class TestFetchFullMovie:
-    @respx.mock
-    def test_enrich_one_movie(self, fixtures: dict, tmp_project, fake_image_client, client: TMDBClient) -> None:
-        movie = fixtures["movie_475557"]
-        movie_id = movie["id"]
-        respx.get(f"https://api.themoviedb.org/3/movie/{movie_id}").mock(return_value=httpx.Response(200, json=movie))
-        # Collection route if present.
-        coll = movie.get("belongs_to_collection")
-        if coll:
-            respx.get(f"https://api.themoviedb.org/3/collection/{coll['id']}").mock(
-                return_value=httpx.Response(200, json=fixtures["collection_633215"])
-            )
-        pair = fetch_full_movie(client, movie_id, fake_image_client)
-        membership, detail = pair
-        assert membership["id"] == movie_id
-        assert detail["runtime"] == movie["runtime"]
-        assert "enriched_at" in detail
 
 
 class TestPushToTmdbList:

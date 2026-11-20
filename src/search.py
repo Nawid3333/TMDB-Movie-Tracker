@@ -1,4 +1,4 @@
-"""Search and add logic for finding films and adding them to the index."""
+"""Resolving TMDB/IMDb links and ids to movies, and pushing them to the TMDB list."""
 
 import logging
 import re
@@ -11,13 +11,6 @@ from config.config import TMDB_LANGUAGE
 from src.atomic_io import atomic_write_bytes
 from src.index import (
     build_membership_record,
-    ensure_record_exists,
-    load_details,
-    load_index,
-    now_iso,
-    save_details,
-    save_index,
-    validate_membership_record,
 )
 from src.tmdb_api import TMDBClient, check_status
 
@@ -50,18 +43,14 @@ _TMDB_ID_RE = re.compile(r"^\d+$")
 
 __all__ = [
     "DuplicateLine",
-    "EnrichError",
     "ParseError",
     "SearchError",
-    "add_movie_locally",
     "delete_file_lines",
-    "fetch_full_movie",
     "is_movie_reference",
     "push_to_tmdb_list",
     "resolve_movie_id_from_input",
     "resolve_movie_input",
     "resolve_movie_ids_from_file",
-    "search_movies",
 ]
 
 
@@ -71,10 +60,6 @@ class SearchError(Exception):
 
 class ParseError(Exception):
     """Raised when the user input cannot be parsed as a valid query."""
-
-
-class EnrichError(Exception):
-    """Raised when fetch_full_movie cannot enrich a known or new record."""
 
 
 class DuplicateLine(NamedTuple):
@@ -163,94 +148,6 @@ def _lookup(
     return [_extract_movie_basic(m) for m in results if isinstance(m, dict) and m.get("id")]
 
 
-def search_movies(
-    client: TMDBClient,
-    query: str,
-    *,
-    year: str | None = None,
-    page: int = 1,
-) -> list[dict]:
-    """Search TMDB for movies by title or year.
-
-    Raises SearchError when the API call fails or the query is malformed.
-    Returns an empty list only when the API responded successfully with no matches.
-    """
-    try:
-        parsed = _parse_user_input(query)
-    except ParseError as exc:
-        logger.warning("Search parse error: %s", exc)
-        raise SearchError(str(exc)) from exc
-
-    if parsed["type"] == "tmdb_id":
-        return _lookup(
-            client,
-            f"/movie/{parsed['value']}",
-            {"language": TMDB_LANGUAGE},
-            {"direct": True},
-        )
-
-    if parsed["type"] == "imdb_id":
-        return _lookup(
-            client,
-            f"/find/{parsed['value']}",
-            {"external_source": "imdb_id", "language": TMDB_LANGUAGE},
-            {"key": "movie_results"},
-        )
-
-    params: dict[str, str | int] = {
-        "query": parsed["value"],
-        "language": TMDB_LANGUAGE,
-        "page": page,
-        "include_adult": "false",
-    }
-    if year:
-        params["year"] = year
-    return _lookup(client, "/search/movie", params, {"key": "results"})
-
-
-def fetch_full_movie(client: TMDBClient, movie_id: int, image_client: httpx.Client) -> tuple[dict, dict]:
-    """Fetch full details for a movie and return (membership, details) dicts.
-
-    Raises:
-        EnrichError: when the record cannot be resolved or enriched.
-        httpx.HTTPError, ValueError: passed through for unexpected failures.
-    """
-    from src.enrich import _enrich_one, _LockedCache
-
-    index = load_index()
-    details = load_details()
-    membership, detail = ensure_record_exists(index, details, movie_id)
-    collection_cache = _LockedCache()
-    try:
-        _enrich_one(client, membership, detail, collection_cache, image_client)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
-            # _enrich_one already marks the membership gone and returns, so
-            # this branch only fires if that convention changes in the future.
-            membership["gone"] = True
-            membership["gone_since"] = membership.get("gone_since") or now_iso()
-        raise EnrichError(f"Could not enrich movie {movie_id}: {exc}") from exc
-    except (httpx.TransportError, httpx.TimeoutException) as exc:
-        raise EnrichError(f"Network error while enriching movie {movie_id}: {exc}") from exc
-    except ValueError as exc:
-        raise EnrichError(f"Invalid response for movie {movie_id}: {exc}") from exc
-    return membership, detail
-
-
-def add_movie_locally(membership: dict, detail: dict) -> None:
-    """Write a movie to the local index and details files."""
-    validate_membership_record(membership)
-    index = load_index()
-    details = load_details()
-    key = str(membership["id"])
-    if "added_at" not in membership:
-        membership["added_at"] = now_iso()
-    index["movies"][key] = membership
-    details["movies"][key] = detail
-    save_index(index)
-    save_details(details)
-
-
 def _resolve_tmdb_id(
     client: TMDBClient,
     parsed: dict,
@@ -259,8 +156,8 @@ def _resolve_tmdb_id(
 ) -> list[dict]:
     r"""Resolve a parsed query dict to a list of membership records.
 
-    Mirrors the lookup logic in ``search_movies`` without the title path,
-    since a batch file should contain direct ids/URLs only.
+    Direct ids and URLs only: a title is not looked up, since a batch file
+    and the push prompt take links and ids.
     """
     if parsed["type"] == "tmdb_id":
         return _lookup(

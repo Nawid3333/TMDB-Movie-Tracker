@@ -1,22 +1,19 @@
-"""Poster download and terminal rendering helpers."""
+"""Poster download into the local cache (data/posters/)."""
 
 import hashlib
 import logging
-import os
 from pathlib import Path
 
 import httpx
 
-from config.config import POSTER_MODE, POSTER_SIZE
+from config.config import POSTER_SIZE
 from src.atomic_io import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "detect_poster_mode",
     "download_poster",
     "poster_cache_path",
-    "render_poster",
 ]
 
 
@@ -70,51 +67,3 @@ def download_poster(
     except Exception as exc:
         logger.warning("Poster download failed for %s: %s", movie_id, exc)
         return None
-
-
-def detect_poster_mode(mode: str = POSTER_MODE) -> str:
-    """Return the effective poster rendering mode for this terminal."""
-    mode = mode.lower()
-    if mode != "auto":
-        return mode
-
-    import os
-
-    if os.getenv("WT_SESSION"):
-        return "iterm"
-    if os.getenv("TERM_PROGRAM") == "iTerm.app" or os.getenv("TERM_PROGRAM") == "WezTerm":
-        return "iterm"
-    if os.getenv("KITTY_WINDOW_ID"):
-        return "kitty"
-    return "blocks"
-
-
-def render_poster(path: Path | str, mode: str = POSTER_MODE) -> str:
-    """Return a terminal escape-string for the poster, or a placeholder."""
-    effective = detect_poster_mode(mode)
-    if effective == "off" or not path or not os.path.exists(str(path)):
-        return ""
-
-    data = Path(path).read_bytes()
-    if effective == "iterm":
-        return _render_iterm(data)
-    if effective == "kitty":
-        return _render_kitty(data)
-    if effective == "sixel":
-        return ""
-    if effective == "blocks":
-        return ""
-    return ""
-
-
-def _render_iterm(data: bytes) -> str:
-    """Render an inline JPEG using the iTerm2 image protocol."""
-    import base64
-
-    b64 = base64.b64encode(data).decode("ascii")
-    return f"\033]1337;File=inline=1:{b64}\007"
-
-
-def _render_kitty(data: bytes) -> str:
-    """Render an inline image using the Kitty graphics protocol (placeholder)."""
-    return ""

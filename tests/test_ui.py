@@ -1,10 +1,9 @@
-"""The terminal layer: width maths, wrapping, boxes, prompts, and cards.
+"""The terminal layer: width maths, boxes and prompts.
 
-This was the least-covered part of the project (cards.py at 0%) and it is the
+This was the least-covered part of the project, and it is the
 part the user actually reads and answers. A miscounted column pushes a box out
-of alignment, a wrong default on a confirm approves something the user meant to
-decline, and a card that raises takes down the browse loop. None of that is
-caught by testing the data layer.
+of alignment, and a wrong default on a confirm approves something the user
+meant to decline. None of that is caught by testing the data layer.
 
 Style note for future edits
 ---------------------------
@@ -21,7 +20,6 @@ import contextlib
 import io
 
 from src.ui import term
-from src.ui.cards import render_detail_card
 from src.ui.prompts import confirm_category, paginate_list
 from src.ui.reports import _is_upcoming, title_line
 
@@ -107,28 +105,7 @@ class TestStyle:
         assert term.style("x", term.Style.BOLD).endswith(term.Style.RESET)
 
 
-# ── wrapping and boxes ──────────────────────────────────────────────────────
-
-
-class TestWrap:
-    def test_short_text_is_one_line(self):
-        assert term.wrap("short", width=40) == ["short"]
-
-    def test_no_line_exceeds_the_width(self):
-        text = "the quick brown fox jumps over the lazy dog " * 4
-        assert all(term.display_width(line) <= 30 for line in term.wrap(text, width=30))
-
-    def test_existing_line_breaks_are_preserved(self):
-        assert term.wrap("one\ntwo", width=40) == ["one", "two"]
-
-    def test_a_word_longer_than_the_width_is_cut_rather_than_looping(self):
-        """The cut-back loop can reach 0; it must fall back, not spin."""
-        lines = term.wrap("x" * 100, width=20)
-        assert lines and all(term.display_width(line) <= 20 for line in lines)
-
-    def test_wrapping_never_loses_words(self):
-        text = "alpha beta gamma delta epsilon zeta eta theta"
-        assert " ".join(term.wrap(text, width=12)).split() == text.split()
+# ── boxes ──────────────────────────────────────────────────────
 
 
 class TestBox:
@@ -248,81 +225,3 @@ class TestPaginateList:
         with captured() as out:
             paginate_list([])
         assert out.getvalue().strip() == ""
-
-
-# ── detail card ─────────────────────────────────────────────────────────────
-
-
-class TestRenderDetailCard:
-    """cards.py had no coverage at all; it is pure rendering over sparse dicts."""
-
-    def test_a_full_record_renders_every_section(self):
-        membership = {"id": 27205, "title": "Inception", "release_date": "2010-07-16", "status": "Released"}
-        detail = {
-            "tagline": "Your mind is the scene of the crime.",
-            "runtime": 148,
-            "genres": ["Action", "Science Fiction"],
-            "directors": ["Christopher Nolan"],
-            "cast": [{"name": "Leonardo DiCaprio", "character": "Cobb"}],
-            "collection": {"id": 1, "name": "Nolan Collection"},
-            "overview": "A thief who steals corporate secrets.",
-        }
-        with captured() as out:
-            render_detail_card(membership, detail)
-        printed = out.getvalue()
-        for expected in ("Inception", "148", "Action", "Christopher Nolan", "Leonardo DiCaprio", "Nolan Collection"):
-            assert expected in printed, f"{expected!r} missing from the card"
-        assert "themoviedb.org/movie/27205" in printed
-
-    def test_connected_tv_left_by_an_older_build_is_not_shown(self):
-        """The tracker is movies only; the card's "Connected TV:" block is gone."""
-        detail = {"connected_tv": [{"id": 1399, "name": "Some Show", "via_keyword": "dream"}]}
-        with captured() as out:
-            render_detail_card({"id": 1, "title": "X"}, detail)
-        printed = out.getvalue()
-        assert "Connected TV" not in printed
-        assert "Some Show" not in printed
-
-    def test_an_almost_empty_record_still_renders(self):
-        """Enrichment is optional, so a bare membership record must not crash."""
-        with captured() as out:
-            render_detail_card({"id": 1, "title": "Bare"}, {})
-        assert "Bare" in out.getvalue()
-
-    def test_a_single_director_is_labelled_in_the_singular(self):
-        with captured() as out:
-            render_detail_card({"id": 1, "title": "X"}, {"directors": ["Solo"]})
-        assert "Director:" in out.getvalue()
-
-    def test_several_directors_are_labelled_in_the_plural(self):
-        with captured() as out:
-            render_detail_card({"id": 1, "title": "X"}, {"directors": ["A", "B"]})
-        assert "Directors:" in out.getvalue()
-
-    def test_cast_prints_every_member(self):
-        cast = [{"name": f"Actor {n}", "character": f"Role {n}"} for n in range(50)]
-        with captured() as out:
-            render_detail_card({"id": 1, "title": "X"}, {"cast": cast})
-        output = out.getvalue()
-        assert "Actor 0" in output
-        assert "Actor 49" in output
-        assert output.count("Actor ") == 50
-
-    def test_a_cast_member_without_a_character_still_appears(self):
-        with captured() as out:
-            render_detail_card({"id": 1, "title": "X"}, {"cast": [{"name": "Nameless Role"}]})
-        assert "Nameless Role" in out.getvalue()
-
-    def test_the_collection_falls_back_to_the_membership_record(self):
-        with captured() as out:
-            render_detail_card({"id": 1, "title": "X", "collection": {"name": "From Membership"}}, {})
-        assert "From Membership" in out.getvalue()
-
-    def test_the_heading_shows_title_and_a_clickable_url_on_a_real_terminal(self, monkeypatch):
-        """The heading is 'Title — URL', with the URL itself carrying an OSC 8 hyperlink."""
-        monkeypatch.setattr(term, "_COLOR", True)
-        with captured() as out:
-            render_detail_card({"id": 27205, "title": "Inception"}, {})
-        printed = out.getvalue()
-        url = "https://www.themoviedb.org/movie/27205"
-        assert f"Inception — \x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\" in printed
