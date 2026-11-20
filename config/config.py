@@ -6,6 +6,7 @@ Loads environment variables, sets paths, and provides tunables.
 import contextlib
 import logging
 import os
+import re
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -38,6 +39,8 @@ LOG_FILE = LOGS_DIR / "movie_tracker.log"
 
 # Mismatch report written when the local index differs from the live TMDB list.
 MISMATCH_REPORT_FILE = DATA_DIR / "mismatch_report.json"
+# Index movies missing from the TMDB list that the user chose to keep (src/off_list.py).
+KEPT_OFF_LIST_FILE = DATA_DIR / "kept_not_on_list.json"
 
 # Default batch file for adding movies from a list of URLs/IDs.
 DEFAULT_BATCH_FILE = BASE_DIR / "movie_urls.txt"
@@ -117,18 +120,34 @@ COLD_REENRICH_DAYS = int(os.getenv("TMDB_COLD_REENRICH_DAYS", "90"))
 MIN_SHRINK_RATIO = float(os.getenv("TMDB_MIN_SHRINK_RATIO", "0.5"))
 
 # ==================== POSTER RENDERING ====================
-POSTER_MODE = os.getenv("POSTER_MODE", "auto").strip().lower()
 POSTER_SIZE = os.getenv("POSTER_SIZE", "w342").strip() or "w342"
 
 
 # ==================== CREDENTIALS ====================
-TMDB_API_KEY = os.getenv("TMDB_API_KEY", "").strip()
-TMDB_LIST_ID = os.getenv("TMDB_LIST_ID", "").strip()
-TMDB_SESSION_ID = os.getenv("TMDB_SESSION_ID", "").strip()
-TMDB_V4_ACCESS_TOKEN = os.getenv("TMDB_V4_ACCESS_TOKEN", "").strip()
-TMDB_API_READ_ACCESS_TOKEN = os.getenv("TMDB_API_READ_ACCESS_TOKEN", "").strip()
-TMDB_USERNAME = os.getenv("TMDB_USERNAME", "").strip()
-TMDB_PASSWORD = os.getenv("TMDB_PASSWORD", "").strip()
+def _credential(name: str) -> str:
+    """An env value, with ENV_TEMPLATE's "your_..._here" placeholders read as unset.
+
+    The first run writes the template and stops; the second run used to load
+    its placeholders as real values -- "API key configured", then
+    int("your_list_id_here") crashed startup as "This is a bug".
+    """
+    value = os.getenv(name, "").strip()
+    return "" if value.startswith("your_") and value.endswith("_here") else value
+
+
+def _list_id(value: str) -> str:
+    """The list number, also out of a pasted list URL (themoviedb.org/list/8678795-name)."""
+    match = re.search(r"/list/(\d+)", value)
+    return match.group(1) if match else value
+
+
+TMDB_API_KEY = _credential("TMDB_API_KEY")
+TMDB_LIST_ID = _list_id(_credential("TMDB_LIST_ID"))
+TMDB_SESSION_ID = _credential("TMDB_SESSION_ID")
+TMDB_V4_ACCESS_TOKEN = _credential("TMDB_V4_ACCESS_TOKEN")
+TMDB_API_READ_ACCESS_TOKEN = _credential("TMDB_API_READ_ACCESS_TOKEN")
+TMDB_USERNAME = _credential("TMDB_USERNAME")
+TMDB_PASSWORD = _credential("TMDB_PASSWORD")
 
 # ==================== REGION / LANGUAGE ====================
 TMDB_LANGUAGE = os.getenv("TMDB_LANGUAGE", "de-DE").strip() or "de-DE"

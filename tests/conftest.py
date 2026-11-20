@@ -70,6 +70,19 @@ def _template_fallback_region(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("config.config.TMDB_FALLBACK_REGION", "DE")
 
 
+@pytest.fixture(autouse=True)
+def _kept_off_list_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test writes the kept-movies file into its own tmp_path.
+
+    The vanished prompt and the startup probe write it, and many tests call
+    them without tmp_project: without this they would write into the real
+    data folder.
+    """
+    path = tmp_path / "kept_not_on_list.json"
+    monkeypatch.setattr("config.config.KEPT_OFF_LIST_FILE", path)
+    return path
+
+
 @pytest.fixture
 def tmp_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect data/logs dirs to a temp path so tests never touch real files."""

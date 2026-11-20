@@ -1,19 +1,15 @@
 """Tests for src.posters."""
 
-import base64
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
-import pytest
 import respx
 
 from src.posters import (
     _poster_url,
-    detect_poster_mode,
     download_poster,
     poster_cache_path,
-    render_poster,
 )
 
 
@@ -137,64 +133,3 @@ class TestPosterCachePathEdges:
     def test_the_configured_posters_dir_is_used_when_none_is_given(self, tmp_path: Path) -> None:
         with patch("config.config.POSTERS_DIR", tmp_path):
             assert poster_cache_path(550, "/abc.jpg").parent == tmp_path
-
-
-class TestDetectPosterMode:
-    def test_explicit(self) -> None:
-        assert detect_poster_mode("iterm") == "iterm"
-
-    def test_an_explicit_mode_is_case_insensitive(self) -> None:
-        assert detect_poster_mode("ITerm") == "iterm"
-
-    @patch.dict("os.environ", {"WT_SESSION": "1"}, clear=False)
-    def test_auto_wt(self) -> None:
-        assert detect_poster_mode("auto") == "iterm"
-
-    @patch.dict("os.environ", {"TERM_PROGRAM": "iTerm.app"}, clear=True)
-    def test_auto_detects_iterm2(self) -> None:
-        assert detect_poster_mode("auto") == "iterm"
-
-    @patch.dict("os.environ", {"TERM_PROGRAM": "WezTerm"}, clear=True)
-    def test_auto_detects_wezterm(self) -> None:
-        assert detect_poster_mode("auto") == "iterm"
-
-    @patch.dict("os.environ", {"KITTY_WINDOW_ID": "3"}, clear=True)
-    def test_auto_detects_kitty(self) -> None:
-        assert detect_poster_mode("auto") == "kitty"
-
-    @patch.dict("os.environ", {}, clear=True)
-    def test_auto_falls_back_to_blocks_on_a_plain_terminal(self) -> None:
-        assert detect_poster_mode("auto") == "blocks"
-
-
-class TestRenderPoster:
-    def test_off_renders_nothing(self, tmp_path: Path) -> None:
-        image = tmp_path / "p.jpg"
-        image.write_bytes(b"jpeg")
-        assert render_poster(image, "off") == ""
-
-    def test_a_missing_file_renders_nothing(self, tmp_path: Path) -> None:
-        assert render_poster(tmp_path / "gone.jpg", "iterm") == ""
-
-    def test_an_empty_path_renders_nothing(self) -> None:
-        assert render_poster("", "iterm") == ""
-
-    def test_iterm_emits_the_inline_image_escape(self, tmp_path: Path) -> None:
-        image = tmp_path / "p.jpg"
-        image.write_bytes(b"jpeg-bytes")
-        out = render_poster(image, "iterm")
-        assert out.startswith("\033]1337;File=inline=1:")
-        assert out.endswith("\007")
-        assert base64.b64encode(b"jpeg-bytes").decode("ascii") in out
-
-    def test_a_string_path_is_accepted_as_well_as_a_path(self, tmp_path: Path) -> None:
-        image = tmp_path / "p.jpg"
-        image.write_bytes(b"jpeg-bytes")
-        assert render_poster(str(image), "iterm") == render_poster(image, "iterm")
-
-    @pytest.mark.parametrize("mode", ["kitty", "sixel", "blocks", "something-else"])
-    def test_the_modes_without_a_renderer_yet_return_empty(self, tmp_path: Path, mode: str) -> None:
-        """Placeholders, but they must return a string rather than raise."""
-        image = tmp_path / "p.jpg"
-        image.write_bytes(b"jpeg")
-        assert render_poster(image, mode) == ""

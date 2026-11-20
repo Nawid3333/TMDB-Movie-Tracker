@@ -48,10 +48,13 @@ def _ensure_index_structure(data: dict) -> dict:
     stored_list_id = data.get("list_id")
     if stored_list_id:
         resolved_list_id = stored_list_id
-    elif _config.TMDB_LIST_ID:
-        resolved_list_id = int(_config.TMDB_LIST_ID)
     else:
-        resolved_list_id = 0
+        # Not int() straight off the .env: a list id that is not a number
+        # crashed every startup here, before anything could say what was wrong.
+        try:
+            resolved_list_id = int(_config.TMDB_LIST_ID or 0)
+        except ValueError:
+            resolved_list_id = 0
 
     return {
         "schema_version": CURRENT_INDEX_SCHEMA,
