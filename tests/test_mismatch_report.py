@@ -18,6 +18,7 @@ from typing import cast
 import pytest
 
 import main
+from src.list_fetcher import ListFetchResult
 from src.tmdb_api import TMDBClient
 
 
@@ -142,7 +143,7 @@ class TestMismatchReportFromAPartialFetch:
         report_path = tmp_path / "mismatch_report.json"
         monkeypatch.setattr(main, "MISMATCH_REPORT_FILE", report_path)
         monkeypatch.setattr(main._config, "TMDB_LIST_ID", "8678795")
-        monkeypatch.setattr(main, "fetch_list", lambda *a, **k: ([], True))
+        monkeypatch.setattr(main, "fetch_list_result", lambda *a, **k: ListFetchResult([], True))
 
         main._probe_tmdb_status(_fake_client(session_id=None), _movie_index)
 

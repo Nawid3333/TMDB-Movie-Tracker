@@ -24,6 +24,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 HOME_VAR = "TMDB_HOME"
@@ -91,3 +93,61 @@ class TestFirstRunBootstrap:
         """Not a config/ subfolder -- the home stays a flat folder the user owns."""
         resolved = Path(_run(tmp_path, "print('<<RESULT>>' + str(c.ENV_FILE))").strip())
         assert resolved == tmp_path / ".env"
+
+
+class TestTheTemplatesPlaceholders:
+    """The second run, with the template written but not filled in yet.
+
+    Its placeholders were loaded as real values: "API key configured", then
+    int("your_list_id_here") crashed startup as "Unexpected error ... This is
+    a bug".
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_inherited_credentials(self, monkeypatch):
+        """Importing config loaded the developer's own .env into os.environ; the child must not see it."""
+        for name in [k for k in os.environ if k.startswith("TMDB_") and k != HOME_VAR]:
+            monkeypatch.delenv(name)
+
+    def test_placeholders_read_as_unset(self, tmp_path):
+        _run(tmp_path, "c.ensure_env_file(); print('<<RESULT>>')")
+        assert "TMDB_LIST_ID=your_list_id_here" in (tmp_path / ".env").read_text(encoding="utf-8")
+        assert _run(tmp_path, "print('<<RESULT>>' + repr((c.TMDB_API_KEY, c.TMDB_LIST_ID)))") == "('', '')"
+
+    def test_real_values_are_kept(self, tmp_path):
+        (tmp_path / ".env").write_text("TMDB_API_KEY=abc123\nTMDB_LIST_ID=8678795\n", encoding="utf-8")
+        assert _run(tmp_path, "print('<<RESULT>>' + repr((c.TMDB_API_KEY, c.TMDB_LIST_ID)))") == "('abc123', '8678795')"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://www.themoviedb.org/list/8678795",
+            "https://www.themoviedb.org/list/8678795-my-watched-films?page=2",
+            "www.themoviedb.org/list/8678795",
+        ],
+    )
+    def test_a_pasted_list_url_gives_its_number(self, tmp_path, value):
+        (tmp_path / ".env").write_text(f"TMDB_LIST_ID={value}\n", encoding="utf-8")
+        assert _run(tmp_path, "print('<<RESULT>>' + c.TMDB_LIST_ID)") == "8678795"
+
+    def test_the_second_run_explains_instead_of_crashing(self, tmp_path):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("TMDB_")}
+        env.update({HOME_VAR: str(tmp_path), "PYTHONPATH": str(REPO_ROOT), "PYTHONIOENCODING": "utf-8"})
+        runs = [
+            subprocess.run(
+                [sys.executable, str(REPO_ROOT / "main.py")],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                cwd=str(tmp_path),
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+            )
+            for _ in range(2)
+        ]
+        first, second = runs
+        assert "Created a credentials file" in first.stdout
+        assert second.returncode == 0, second.stdout + second.stderr
+        assert "TMDB_API_KEY is not set" in second.stdout
+        assert "This is a bug" not in second.stdout

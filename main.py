@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import sys
+from collections.abc import Iterable
 from datetime import UTC, datetime
 
 import config.config as _config
@@ -17,12 +18,13 @@ from config.config import (
     ensure_env_file,
     setup_logging,
 )
+from src import off_list
 from src.atomic_io import atomic_write_bytes, atomic_write_json
 from src.changes import apply_changes, detect_changes
 from src.enrich import run_full_scan as enrich_run_full_scan
 from src.gaps import find_gaps
 from src.index import load_index, now_iso, save_index
-from src.list_fetcher import ListFetchError, fetch_list
+from src.list_fetcher import ListFetchError, fetch_list, fetch_list_result
 from src.search import (
     DuplicateLine,
     SearchError,
@@ -136,16 +138,37 @@ def _format_host_rows(hosts):
     return lines
 
 
+# The menu's one source of truth: its numbers, the actions main() binds to
+# them, and every "run option N" hint elsewhere all come from here. The push
+# hints once sent the user to the Full scan's number for the Fast scan.
+MENU: tuple[tuple[str, str, str], ...] = (
+    ("1", "Full scan", "every detail (slow, accurate)"),
+    ("2", "Fast scan", "list membership only (quick)"),
+    ("3", "Franchise gaps", "films from your movies' collections you missed"),
+    ("4", "Push URL file", "push URLs/IDs to remote list without adding locally"),
+    ("5", "Force re-enrich", "re-fetch every movie, ignoring freshness"),
+)
+
+
+def menu_option(name: str) -> str:
+    """The menu number of the option called *name*, e.g. "2" for "Fast scan"."""
+    for key, label, _blurb in MENU:
+        if label == name:
+            return key
+    raise KeyError(name)
+
+
+def _fast_scan_hint() -> str:
+    return f"  → Run option {menu_option('Fast scan')} (Fast scan) to pull the list into your local index."
+
+
 def show_menu() -> None:
     """Print the main menu."""
     print()
     print(term.step("Menu"))
     print("  " + "─" * 52)
-    print("  1. Full scan       — every detail (slow, accurate)")
-    print("  2. Fast scan       — list membership only (quick)")
-    print("  3. Franchise gaps  — films from your movies' collections you missed")
-    print("  4. Push URL file   — push URLs/IDs to remote list without adding locally")
-    print("  5. Force re-enrich — re-fetch every movie, ignoring freshness")
+    for key, label, blurb in MENU:
+        print(f"  {key}. {label:<16}— {blurb}")
     print("  0. Exit")
 
 
@@ -194,6 +217,23 @@ def run_fast_scan(client: TMDBClient) -> None:
 
     _notify_non_movie_list_items(client, items)
 
+    _review_fast_scan(client, index, items, incomplete)
+
+    # After every way the review can end: movies kept off the list that are
+    # back on it, or were deleted from the index just now, leave the file.
+    if not incomplete:
+        off_list.reconcile_kept(load_index().get("movies", {}), _movie_only_ids(items))
+
+
+def _keep_off_list(movies: dict, movie_ids: Iterable[int]) -> None:
+    """Note index movies kept although they are not on the list, in the kept-movies file."""
+    kept = off_list.record_kept(movies, movie_ids)
+    if kept:
+        print(term.dim(f"  → Kept {kept} movie(s) that are not on the TMDB list; listed in {off_list.kept_file()}"))
+
+
+def _review_fast_scan(client: TMDBClient, index: dict, items: list[dict], incomplete: bool) -> None:
+    """Show what changed on the list, ask about it, and save what was approved."""
     change_set = detect_changes(
         index.get("movies", {}),
         items,
@@ -203,10 +243,24 @@ def run_fast_scan(client: TMDBClient) -> None:
     reports.render_change_report(change_set)
 
     if not change_set.additions and not change_set.removals:
+        if change_set.incomplete:
+            # Nothing to review here only means the read found nothing new.
+            # This used to say "Index is up to date" and stamp the scan as
+            # done, right under the warning that the read was incomplete --
+            # even when TMDB could not be reached at all.
+            log.debug("Fast scan: nothing to review, but the scan was incomplete")
+            print(term.warn("⚠ The index could not be confirmed up to date (see above). Try again later."))
+            return
         index["last_fast_scan"] = now_iso()
         save_index(index)
         log.debug("Fast scan complete; no changes")
-        print(term.ok("✓ Index is up to date."))
+        if _vanished_ids(index, items):
+            # Only movies marked gone (TMDB deleted them) can be missing from
+            # the list here: removals leave them out. They used to go unasked
+            # under "Index is up to date".
+            _prompt_clean_vanished(client, items, index)
+        else:
+            print(term.ok("✓ Index is up to date."))
         return
 
     approve_additions = False
@@ -217,12 +271,17 @@ def run_fast_scan(client: TMDBClient) -> None:
     approve_removals = False
     if change_set.removals:
         titles = title_link_rows(change_set.removals.values())
-        approve_removals = prompts.confirm_category("Removals", titles)
+        approve_removals = prompts.confirm_category("Removals (no longer on the TMDB list)", titles)
+
+    # Asked once: the vanished prompt below does not ask about them again.
+    declined_removals = set() if approve_removals else {int(mid) for mid in change_set.removals}
+    _keep_off_list(index.get("movies", {}), declined_removals)
 
     if not approve_additions and not approve_removals:
         print()
         print(term.warn("  ⚠ No changes approved."), "Index was not modified.")
         log.debug("Fast scan: user approved no changes")
+        _prompt_clean_vanished(client, items, index, incomplete=change_set.incomplete, asked=declined_removals)
         return
 
     print()
@@ -236,6 +295,9 @@ def run_fast_scan(client: TMDBClient) -> None:
         print()
         print(term.warn("  ⚠ Changes discarded."))
         log.debug("Fast scan: user cancelled save")
+        if approve_removals:
+            # Approved, then not saved: they are still in the index.
+            _keep_off_list(index.get("movies", {}), (int(mid) for mid in change_set.removals))
         return
 
     merged = apply_changes(
@@ -271,7 +333,7 @@ def run_fast_scan(client: TMDBClient) -> None:
     # when the shrink gate blocked removals, and passing the raw flag here
     # offered to bulk-delete, one "y" away, the very movies the gate had just
     # refused to propose -- right under "Removal proposals are blocked".
-    _prompt_clean_vanished(client, items, index, incomplete=change_set.incomplete)
+    _prompt_clean_vanished(client, items, index, incomplete=change_set.incomplete, asked=declined_removals)
 
 
 def _movie_only_ids(items: list[dict]) -> set[int]:
@@ -402,11 +464,14 @@ def _prompt_clean_vanished(
     index: dict | None = None,
     *,
     incomplete: bool = False,
+    asked: set[int] | None = None,
 ) -> None:
     """Detect index movies missing from the live list and ask to delete or rescrape.
 
     Nothing is offered when the fetch was incomplete: a movie on a page that
-    failed to load looks exactly like one that left the list.
+    failed to load looks exactly like one that left the list. *asked* are
+    movies the caller has just asked about; they are not asked twice. Every
+    movie kept here is listed in the kept-movies file (src/off_list.py).
     """
     remote_list_id = _config.TMDB_LIST_ID
     if not remote_list_id:
@@ -415,7 +480,7 @@ def _prompt_clean_vanished(
     if index is None:
         index = load_index()
     local_movies = index.get("movies", {})
-    missing_ids = _vanished_ids(index, items)
+    missing_ids = [mid for mid in _vanished_ids(index, items) if mid not in (asked or set())]
 
     if not missing_ids:
         return
@@ -455,9 +520,11 @@ def _prompt_clean_vanished(
         return
     if bulk == "n":
         print("  → Skipped vanish cleanup")
+        _keep_off_list(local_movies, missing_ids)
         return
 
     rescrape_ids: list[int] = []
+    skipped_ids: list[int] = []
     removed = 0
     for movie_id in missing_ids:
         movie = local_movies.get(str(movie_id), {})
@@ -475,6 +542,8 @@ def _prompt_clean_vanished(
             rescrape_ids.append(movie_id)
         else:
             print("  → Skipped")
+            skipped_ids.append(movie_id)
+    _keep_off_list(local_movies, skipped_ids)
 
     if removed:
         index["movies"] = local_movies
@@ -484,11 +553,13 @@ def _prompt_clean_vanished(
     if rescrape_ids:
         if not client.session_id:
             print("\n" + term.danger("✗ No TMDB session; cannot re-add movies to the list."))
+            _keep_off_list(local_movies, rescrape_ids)
             return
         print()
         print(f"  Re-adding {len(rescrape_ids)} movie(s) to TMDB list {remote_list_id}...")
         ok = 0
         failed = 0
+        not_re_added: list[int] = []
         for movie_id in rescrape_ids:
             result = push_to_tmdb_list(client, remote_list_id, movie_id)
             if result["success"]:
@@ -497,9 +568,11 @@ def _prompt_clean_vanished(
                 membership["remote_push"] = "rescraped"
             else:
                 failed += 1
+                not_re_added.append(movie_id)
                 print(f"  ⚠ Could not re-add {title_link(local_movies.get(str(movie_id), {}))}: {result}")
         save_index(index)
         print(f"  Re-add result: {ok} ok, {failed} failed")
+        _keep_off_list(local_movies, not_re_added)
 
         if prompts.confirm("\nVerify against the live TMDB list now?"):
             _fetch_and_summarize_mismatches(client, added_ids=set(rescrape_ids))
@@ -624,13 +697,60 @@ def _render_mismatch_summary(
         print(term.warn("  ⚠ List fetch was incomplete; movies counted missing may still be on the list."))
 
 
-def _compare_text(count: int, idx_count: int) -> str:
-    """Return 'match' or 'mismatch (±N)' for the startup table."""
-    diff = idx_count - count
-    if diff == 0:
+def _compare_text(live_ids: set[int], local_ids: set[int]) -> str:
+    """Return 'match' or 'mismatch (±N)' for the startup table.
+
+    Compared by movie, not by count: one movie gone from the list and another
+    one added left both counts equal, and the table said "match".
+    """
+    if live_ids == local_ids:
         return "match"
+    diff = len(local_ids) - len(live_ids)
+    if diff == 0:
+        return "mismatch"
     sign = "+" if diff > 0 else ""
     return f"mismatch ({sign}{diff})"
+
+
+# Rows listed per side under the startup table; the rest are in the mismatch report.
+_STARTUP_MISMATCH_ROWS = 10
+
+
+def _print_startup_mismatches(index: dict, items: list[dict]) -> None:
+    """Name the movies behind a "mismatch" in the startup table.
+
+    Index movies missing from the list that the user already chose to keep
+    are marked "(kept)"; they are listed in the kept-movies file as well.
+    """
+    movies = index.get("movies", {})
+    live_ids = _movie_only_ids(items)
+    local_ids = {int(mid) for mid in movies}
+    not_on_list = sorted(local_ids - live_ids)
+    not_in_index = sorted(live_ids - local_ids)
+    if not not_on_list and not not_in_index:
+        return
+
+    def _rows(ids: list[int], records: list[dict], marks: list[str]) -> None:
+        for row, mark in zip(title_link_rows(records[:_STARTUP_MISMATCH_ROWS]), marks, strict=False):
+            print(f"      - {row}{mark}")
+        if len(ids) > _STARTUP_MISMATCH_ROWS:
+            print(f"      … and {len(ids) - _STARTUP_MISMATCH_ROWS} more, listed in {MISMATCH_REPORT_FILE}")
+
+    if not_on_list:
+        kept = off_list.load_kept()
+        print(term.warn(f"  ⚠ {len(not_on_list)} movie(s) in your index are not on the TMDB list:"))
+        _rows(
+            not_on_list,
+            [{**movies[str(mid)], "id": mid} for mid in not_on_list],
+            [" (kept)" if str(mid) in kept else "" for mid in not_on_list[:_STARTUP_MISMATCH_ROWS]],
+        )
+        if kept:
+            print(term.dim(f"    Movies you chose to keep are listed in {off_list.kept_file()}"))
+    if not_in_index:
+        by_id = {int(item["id"]): item for item in items if item.get("media_type") == "movie" and item.get("id")}
+        print(term.warn(f"  ⚠ {len(not_in_index)} movie(s) on the TMDB list are not in your index:"))
+        _rows(not_in_index, [by_id[mid] for mid in not_in_index], [""] * _STARTUP_MISMATCH_ROWS)
+    print(term.dim(f"  → Run option {menu_option('Fast scan')} (Fast scan) to sync them."))
 
 
 def _probe_tmdb_status(client: TMDBClient, index: dict) -> None:
@@ -645,24 +765,38 @@ def _probe_tmdb_status(client: TMDBClient, index: dict) -> None:
         return
 
     try:
-        items, incomplete = fetch_list(client, list_id)
+        result = fetch_list_result(client, list_id)
     except ListFetchError as exc:
         log.error("Startup list probe failed: %s", exc)
         host_row = (label, False, None, len(index.get("movies", {})), "fetch failed")
         for line in _format_host_rows([host_row]):
             print(line)
         return
+    items, incomplete = result.items, result.incomplete
 
-    live_count = len(_movie_only_ids(items))
-    idx_count = len(index.get("movies", {}))
+    live_ids = _movie_only_ids(items)
+    local_ids = {int(mid) for mid in index.get("movies", {})}
     # `incomplete` is the only real failure signal here -- a complete fetch of a
     # genuinely empty list is a successful probe, not a failed one.
     status = not incomplete
-    compare = _compare_text(live_count, idx_count)
-    host_row = (label, status, live_count, idx_count, compare)
+    compare = _compare_text(live_ids, local_ids)
+    host_row = (label, status, len(live_ids), len(local_ids), compare)
 
     for line in _format_host_rows([host_row]):
         print(line)
+    if result.hidden:
+        print(term.dim(f"  TMDB counts {result.expected:,} entries on the list but shows only {len(items):,}:"))
+        print(
+            term.dim(
+                f"  {result.hidden} {'is a movie' if result.hidden == 1 else 'are movies'} TMDB hides "
+                "(usually deleted or merged on TMDB). Nothing to fix here."
+            )
+        )
+    # Only a complete read can say which movies differ: on a partial one, a
+    # movie on a page that failed to load looks like one that left the list.
+    if not incomplete:
+        _print_startup_mismatches(index, items)
+        off_list.reconcile_kept(index.get("movies", {}), live_ids)
 
     _notify_non_movie_list_items(client, items)
 
@@ -844,7 +978,7 @@ def run_push_url_file_only(client: TMDBClient) -> None:
     if not to_push:
         print()
         print(term.ok("✓ Nothing new to push."))
-        print("  → Run option 1 (Fast scan) to pull the list into your local index.")
+        print(_fast_scan_hint())
         return
 
     print()
@@ -876,7 +1010,7 @@ def run_push_url_file_only(client: TMDBClient) -> None:
     )
     if already_present:
         print(f"  {len(already_present)} already on the list were skipped before pushing.")
-    print("  → Run option 1 (Fast scan) to pull the list into your local index.")
+    print(_fast_scan_hint())
 
 
 def run_clean_vanished(client: TMDBClient) -> None:
@@ -1050,13 +1184,14 @@ def main() -> None:
     if _config.TMDB_LIST_ID:
         print(f"  → List ID: {_config.TMDB_LIST_ID}")
 
-    actions = {
-        "1": run_full_scan,
-        "2": run_fast_scan,
-        "3": run_franchise_gaps,
-        "4": run_push_url_file_only,
-        "5": run_force_full_scan,
+    handlers = {
+        "Full scan": run_full_scan,
+        "Fast scan": run_fast_scan,
+        "Franchise gaps": run_franchise_gaps,
+        "Push URL file": run_push_url_file_only,
+        "Force re-enrich": run_force_full_scan,
     }
+    actions = {key: handlers[label] for key, label, _blurb in MENU}
 
     with TMDBClient() as client:
         # Resolve (or create) a TMDB session at startup. Once a session is approved
@@ -1075,7 +1210,7 @@ def main() -> None:
             # A typo is asked again; end of input, or a run of unusable
             # answers, exits (0) instead of looping on the menu forever.
             try:
-                choice = prompts.ask("Enter your choice (0-5): ", ("0", *actions), safe="0")
+                choice = prompts.ask(f"Enter your choice (0-{len(MENU)}): ", ("0", *actions), safe="0")
             except KeyboardInterrupt:
                 print()
                 log.info("Goodbye!")

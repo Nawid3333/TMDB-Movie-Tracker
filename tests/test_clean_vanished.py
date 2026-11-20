@@ -116,7 +116,7 @@ class TestIncompleteFetch:
         monkeypatch.setattr(main, "_render_mismatch_summary", lambda *a, **k: None)
         monkeypatch.setattr(main, "_prompt_clean_vanished", lambda *a, **k: calls.append(k))
         main.run_fast_scan(_client())
-        assert calls == [{"incomplete": True}]
+        assert [call["incomplete"] for call in calls] == [True]
 
     def test_the_shrink_gate_keeps_the_cleanup_from_offering_what_it_blocked(self, saved, monkeypatch, capsys):
         """The fetch looked complete, but the list came back far smaller than the index.
@@ -225,3 +225,34 @@ class TestOneByOne:
         assert pushed == [(LIST_ID, 2)]
         assert _kept(saved[-1]) == [1, 2]
         assert saved[-1]["movies"]["2"]["remote_push"] == "rescraped"
+
+
+class TestANothingNewFastScan:
+    """A fast scan with nothing to review only says "up to date" when it read the whole list."""
+
+    def _run(self, saved, monkeypatch, capsys, fetched: tuple[list[dict], bool]) -> str:
+        index = _index(1, 2)
+        index["meta"] = {}
+        monkeypatch.setattr(main, "load_index", lambda: index)
+        monkeypatch.setattr(main, "fetch_list", lambda *a, **k: fetched)
+        _answer(monkeypatch)  # nothing here may ask anything
+        main.run_fast_scan(_client())
+        return capsys.readouterr().out
+
+    def test_a_complete_read_is_up_to_date_and_stamped(self, saved, monkeypatch, capsys):
+        out = self._run(saved, monkeypatch, capsys, (_list(1, 2), False))
+        assert "Index is up to date" in out
+        assert len(saved) == 1
+        assert saved[0]["last_fast_scan"]
+
+    def test_an_unreachable_list_is_not_reported_up_to_date(self, saved, monkeypatch, capsys):
+        """TMDB down: no items, incomplete. It used to print "✓ Index is up to date"."""
+        out = self._run(saved, monkeypatch, capsys, ([], True))
+        assert "Index is up to date" not in out
+        assert "could not be confirmed up to date" in out
+        assert saved == []
+
+    def test_a_partial_read_with_nothing_new_is_not_up_to_date_either(self, saved, monkeypatch, capsys):
+        out = self._run(saved, monkeypatch, capsys, (_list(1), True))
+        assert "Index is up to date" not in out
+        assert saved == []

@@ -11,11 +11,11 @@ A small, terminal-driven Python tool that keeps a local mirror of a TMDB custom 
 ## What it does
 
 - **Fast scan** — fetches the current TMDB list, diffs it against the local index and lets you approve additions/removals before saving. This is the quickest way to keep the index in sync.
+- **Index and list always compared** — at startup, the table compares your index with the TMDB list movie by movie and names every movie that is on one side only. A movie in your index that left the list is asked about once per scan (delete it?); every one you keep is listed in `data/kept_not_on_list.json`, with its title, TMDB link and the date you first kept it, so you can check it on TMDB. An entry leaves that file by itself once the movie is back on the list or deleted from the index. TV shows on the list are flagged, with an offer to remove them. `data/mismatch_report.json` holds the full comparison whenever the two differ.
 - **Full scan** — re-enriches every movie with full TMDB details (credits, release dates, watch providers, recommendations, similar, collection info).
 - **Franchise gaps** — finds the films of your movies' TMDB collections that are not yet in your index. Movies only; no TV series.
-- **Search & add** — accepts a title, TMDB URL/ID or IMDb URL/ID and adds the movie locally (and optionally pushes it to the remote TMDB list when a session is available).
-- **Push URL file** — pushes the movies in a text file (`movie_urls.txt` by default, one TMDB/IMDb URL or id per line, `#` for comments) to the remote list without adding them locally. Lines naming a movie an earlier line already names are listed and deleted from the file after a **y**; the first line stays, and **n** leaves the file as it is.
-- **Poster rendering** — downloads and renders inline posters for iTerm2, Kitty, Windows Terminal or block-art terminals (configurable, falls back to off).
+- **Push URL file** — pushes the movies in a text file (`movie_urls.txt` by default, one TMDB/IMDb URL or id per line, `#` for comments), or a single pasted TMDB/IMDb URL or id, to the remote list without adding them locally. Lines naming a movie an earlier line already names are listed and deleted from the file after a **y**; the first line stays, and **n** leaves the file as it is.
+- **Poster cache** — a full scan downloads each movie's poster into `data/posters/`.
 - **Atomic writes & backups** — every JSON write is atomic via temp-file + `fsync` + `os.replace`, with automatic `.bak1`/`.bak2`/`.bak3` rotation.
 
 ---
@@ -171,14 +171,16 @@ TMDB Movie Tracker/
 │   ├── gaps.py                # Franchise gaps (missing collection films)
 │   ├── index.py               # Index + details persistence helpers
 │   ├── list_fetcher.py        # Paginated TMDB list fetch + cache
-│   ├── posters.py             # Poster download / terminal rendering
-│   ├── search.py              # Search / add / push to TMDB list
+│   ├── posters.py             # Poster download into data/posters/
+│   ├── off_list.py            # Kept movies that are not on the TMDB list
+│   ├── search.py              # Resolve links/ids, push to TMDB list
 │   ├── tmdb_api.py            # TMDB client, rate limiter, auth ladder
 │   └── ui/                    # Terminal widgets, prompts, reports
 ├── tests/                     # pytest suite
 ├── data/                      # Runtime data (ignored by git)
 │   ├── index.json             # Membership records
 │   ├── details.json           # Enriched details
+│   ├── kept_not_on_list.json  # Index movies not on the list that you kept
 │   └── posters/               # Downloaded poster cache
 ├── logs/                      # Rotating logs (ignored by git)
 ├── main.py                    # CLI entry point
@@ -248,7 +250,6 @@ All values below can be set via `.env`:
 | `TMDB_COOL_DAYS`               | `730`   | Days until a released movie becomes "cool"           |
 | `TMDB_COLD_REENRICH_DAYS`      | `90`    | Re-enrich "cold" movies after this many days         |
 | `TMDB_MIN_SHRINK_RATIO`        | `0.5`   | Shrink sanity gate for fast-scan removals            |
-| `POSTER_MODE`                  | `auto`  | `auto`, `iterm`, `kitty`, `sixel`, `blocks` or `off` |
 | `POSTER_SIZE`                  | `w342`  | TMDB poster size to download                         |
 
 ---
@@ -292,10 +293,10 @@ See [LICENSE](LICENSE) for the full text.
 ## Roadmap / known limitations
 
 - The tool is currently a single-user, local CLI. Multi-user or web use would require a real database and auth backend.
-- Poster rendering relies on terminal emulator support.
 - Packaging (`pip install`) is implemented via `pyproject.toml`; run `pip install -e .` to install the `movie-tracker` console script.
-- CI/CD, automated releases and pre-built binaries are not provided.
+- Releases ship a wheel and an sdist (built by CI); there are no standalone executables.
 - Franchise gaps come from TMDB collections only; a related film TMDB has not put in the same collection is not reported.
+- TMDB can keep counting a list entry it no longer shows, usually a movie it deleted or merged. A few such entries (up to 5, or 1% of a long list) that read the same twice are reported under the startup table as hidden, and the fetch counts as complete. A larger gap, or one that changes between reads, still counts as an incomplete fetch, and removals stay blocked.
 
 ---
 
